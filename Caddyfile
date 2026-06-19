@@ -1,0 +1,39 @@
+# AI Companion — Caddy Reverse Proxy Configuration
+# Replace companion.example.com with your actual domain.
+# Caddy automatically provisions and renews Let's Encrypt SSL certificates.
+
+companion.example.com {
+    # API requests → backend
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            # Rate limiting (simple — 10 req/s per IP)
+            # For advanced rate limiting, use Caddy's rate_limit plugin
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+        }
+    }
+
+    # Everything else → frontend
+    handle {
+        reverse_proxy frontend:3000
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(self), microphone=(self), geolocation=()"
+    }
+
+    # Gzip compression
+    encode gzip zstd
+
+    # Access logs
+    log {
+        output file /data/access.log
+        format json
+    }
+}

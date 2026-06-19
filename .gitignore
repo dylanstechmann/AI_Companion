@@ -1,0 +1,94 @@
+# ──────────────────────────────────────────────
+# Environment & Secrets
+# ──────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ──────────────────────────────────────────────
+# Data & Runtime Artifacts
+# ──────────────────────────────────────────────
+data/
+sandbox/
+*.db
+*.sqlite3
+
+# ──────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ──────────────────────────────────────────────
+# Node.js
+# ──────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.vite/
+.next/
+.nuxt/
+*.tsbuildinfo
+.eslintcache
+
+# ──────────────────────────────────────────────
+# Docker
+# ──────────────────────────────────────────────
+docker-compose.override.yml
+
+# ──────────────────────────────────────────────
+# IDE & Editor
+# ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ──────────────────────────────────────────────
+# OS
+# ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# ──────────────────────────────────────────────
+# Model Weights & Caches
+# ──────────────────────────────────────────────
+*.bin
+*.pt
+*.onnx
+*.safetensors
+huggingface/
+.cache/
+
+# ──────────────────────────────────────────────
+# Stray / accidental artifacts
+# ──────────────────────────────────────────────
+nul
+**/nul
+mpfb2.zip
+browser-tools-mcp/
+# Generated inspection/validation outputs from backend dev scripts
+backend/materials_out.txt
+backend/avatar_db_result.txt
+backend/glb_validation.txt
+backend/screenshot_chat.png
