@@ -15,41 +15,53 @@ import os
 from mathutils import Vector
 from bl_ext.user_default.mpfb.services.humanservice import HumanService
 
+BASE_DIR = r'c:\Users\AyeBayBay\Projects\AI_Companion'
 OUT_DIR = r'c:\Users\AyeBayBay\Projects\AI_Companion\frontend\public\avatars'
 
-# Body-shape macros + material palette per character.
+# Body-shape macros + assets + material palette per character.
 CHARACTERS = [
     {
         'name': 'greg_3d',
         'macro': {'gender': 1.0, 'age': 0.5, 'muscle': 0.82, 'weight': 0.45,
                   'proportions': 0.5, 'height': 0.62, 'cupsize': 0.5, 'firmness': 0.5,
                   'race': {'asian': 0.15, 'caucasian': 0.8, 'african': 0.05}},
-        'skin': (0.80, 0.61, 0.49), 'shirt': (0.42, 0.45, 0.50),
-        'pants': (0.20, 0.26, 0.40), 'shoes': (0.10, 0.10, 0.12),
-        'hair': (0.09, 0.06, 0.04), 'lips': (0.66, 0.40, 0.36),
+        'eye_color': (0.18, 0.28, 0.36),  # Blue-gray
+        'skin_path': r'makehuman_system_assets_cc0\skins\young_caucasian_male\young_caucasian_male.mhmat',
+        'clothes': r'makehuman_system_assets_cc0\clothes\male_casualsuit01\male_casualsuit01.mhclo',
+        'shoes': r'makehuman_system_assets_cc0\clothes\shoes01\shoes01.mhclo',
+        'hair': r'makehuman_system_assets_cc0\hair\short01\short01.mhclo',
     },
     {
         'name': 'tiffany_3d',
         'macro': {'gender': 0.0, 'age': 0.45, 'muscle': 0.40, 'weight': 0.46,
                   'proportions': 0.55, 'height': 0.48, 'cupsize': 0.78, 'firmness': 0.62,
                   'race': {'asian': 0.2, 'caucasian': 0.75, 'african': 0.05}},
-        'skin': (0.92, 0.75, 0.65), 'shirt': (0.93, 0.93, 0.95),
-        'pants': (0.18, 0.18, 0.22), 'shoes': (0.09, 0.09, 0.10),
-        'hair': (0.33, 0.19, 0.08), 'lips': (0.80, 0.40, 0.42),
+        'eye_color': (0.15, 0.32, 0.18),  # Green
+        'skin_path': r'makehuman_system_assets_cc0\skins\young_caucasian_female\young_caucasian_female.mhmat',
+        'clothes': r'makehuman_system_assets_cc0\clothes\female_casualsuit01\female_casualsuit01.mhclo',
+        'shoes': r'makehuman_system_assets_cc0\clothes\shoes02\shoes02.mhclo',
+        'hair': r'makehuman_system_assets_cc0\hair\long01\long01.mhclo',
     },
     {
         'name': 'friendly_ai_3d',
         'macro': {'gender': 0.5, 'age': 0.5, 'muscle': 0.5, 'weight': 0.5,
                   'proportions': 0.5, 'height': 0.5, 'cupsize': 0.45, 'firmness': 0.5,
                   'race': {'asian': 0.33, 'caucasian': 0.34, 'african': 0.33}},
-        'skin': (0.85, 0.69, 0.61), 'shirt': (0.27, 0.55, 0.63),
-        'pants': (0.24, 0.24, 0.30), 'shoes': (0.90, 0.90, 0.92),
-        'hair': (0.13, 0.10, 0.08), 'lips': (0.74, 0.44, 0.42),
+        'eye_color': (0.45, 0.32, 0.12),  # Glowing golden hazel
+        'skin_path': r'makehuman_system_assets_cc0\skins\young_asian_female\young_asian_female.mhmat',
+        'clothes': r'makehuman_system_assets_cc0\clothes\female_sportsuit01\female_sportsuit01.mhclo',
+        'shoes': r'makehuman_system_assets_cc0\clothes\shoes03\shoes03.mhclo',
+        'hair': r'makehuman_system_assets_cc0\hair\bob02\bob02.mhclo',
     },
 ]
 
 
 def clear_scene():
+    if bpy.context.object and bpy.context.object.mode != 'OBJECT':
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
     for coll in (bpy.data.meshes, bpy.data.materials, bpy.data.armatures):
@@ -80,23 +92,51 @@ def centroid(verts):
 
 
 def delete_non_body(obj):
-    """Remove helper cage / joint cubes / helper eyes, keeping only the body skin."""
+    """Remove helper cage / joint cubes / helper eyes, keeping only the body skin and deleting vertices under clothes."""
+    import bmesh
     me = obj.data
-    # drop the mask modifier (we delete geometry instead)
-    for m in list(obj.modifiers):
-        obj.modifiers.remove(m)
-    bidx = obj.vertex_groups['body'].index
-    keep = set()
-    for v in me.vertices:
-        if any(g.group == bidx and g.weight > 0 for g in v.groups):
-            keep.add(v.index)
+    
+    # Identify delete groups for clothes (vertex groups starting with "Delete.")
+    delete_group_indices = [vg.index for vg in obj.vertex_groups if vg.name.startswith('Delete.')]
+    body_vg = obj.vertex_groups.get('body')
+    body_idx = body_vg.index if body_vg else None
+    
     bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.mode_set(mode='OBJECT')
-    for v in me.vertices:
-        v.select = v.index not in keep
     bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.delete(type='VERT')
+    
+    bm = bmesh.from_edit_mesh(me)
+    bm.verts.ensure_lookup_table()
+    
+    deform_layer = bm.verts.layers.deform.active
+    if not deform_layer:
+        deform_layer = bm.verts.layers.deform.verify()
+        
+    verts_to_delete = []
+    for v in bm.verts:
+        weights = v[deform_layer]
+        
+        # Check if vertex belongs to the body
+        is_body = body_idx is not None and body_idx in weights and weights[body_idx] > 0
+        
+        # Check if vertex is marked to be deleted by clothes masks
+        under_clothes = False
+        for dg_idx in delete_group_indices:
+            if dg_idx in weights and weights[dg_idx] > 0.5:
+                under_clothes = True
+                break
+                
+        if not is_body or under_clothes:
+            verts_to_delete.append(v)
+            
+    bmesh.ops.delete(bm, geom=verts_to_delete, context='VERTS')
+    bmesh.update_edit_mesh(me)
     bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # Clean up mask modifiers from the body mesh (since we deleted geometry)
+    for m in list(obj.modifiers):
+        if m.type == 'MASK':
+            obj.modifiers.remove(m)
+
 
 
 def build_shapekeys(obj):
@@ -224,75 +264,129 @@ def make_mat(name, rgb, rough=0.6, metallic=0.0):
 def assign_materials(obj, palette):
     me = obj.data
     me.materials.clear()
-    mats = {
-        'skin': make_mat('skin', palette['skin'], 0.55),
-        'shirt': make_mat('shirt', palette['shirt'], 0.75),
-        'pants': make_mat('pants', palette['pants'], 0.8),
-        'shoes': make_mat('shoes', palette['shoes'], 0.5),
-        'hair': make_mat('hair', palette['hair'], 0.45),
-        'lips': make_mat('lips', palette['lips'], 0.45),
-    }
-    order = ['skin', 'shirt', 'pants', 'shoes', 'hair', 'lips']
-    for k in order:
-        me.materials.append(mats[k])
-    mi = {k: i for i, k in enumerate(order)}
-
-    scalp_idx = {v.index for v in group_verts(obj, 'scalp', 0.5)}
+    skin_mat = make_mat('skin', palette['skin'], 0.55)
+    lips_mat = make_mat('lips', palette['lips'], 0.45)
+    me.materials.append(skin_mat)
+    me.materials.append(lips_mat)
+    
     lips_idx = {v.index for v in group_verts(obj, 'lips', 0.5)}
-    zmax = max(v.co.z for v in me.vertices)
-
+    
     for poly in me.polygons:
         vs = poly.vertices
-        c = Vector((0, 0, 0))
-        for vi in vs:
-            c += me.vertices[vi].co
-        c /= len(vs)
-        # majority membership tests
-        in_scalp = sum(1 for vi in vs if vi in scalp_idx) > len(vs) / 2
         in_lips = sum(1 for vi in vs if vi in lips_idx) > len(vs) / 2
-        if in_scalp:
-            poly.material_index = mi['hair']
-        elif in_lips:
-            poly.material_index = mi['lips']
-        elif c.z > 0.82 * zmax:
-            poly.material_index = mi['skin']        # head + neck
-        elif abs(c.x) > 0.20:
-            poly.material_index = mi['skin']        # bare arms / hands
-        elif c.z > 0.58 * zmax:
-            poly.material_index = mi['shirt']       # torso
-        elif c.z > 0.10 * zmax:
-            poly.material_index = mi['pants']       # hips + legs
+        if in_lips:
+            poly.material_index = 1
         else:
-            poly.material_index = mi['shoes']       # feet
+            poly.material_index = 0
     me.update()
 
 
-def add_eyeballs(obj, head_c, ul_l, palette):
-    eye_z = ul_l.z - 0.013
-    eye_y = head_c.y - 0.135
-    eye_x = 0.031
-    iris = make_mat('eye', (0.04, 0.04, 0.05), 0.25)
+def add_eyeballs(obj, head_c, ul_l, palette, rig):
+    mesh = obj.data
+    zmin = min(v.co.z for v in mesh.vertices)
+    zmax = max(v.co.z for v in mesh.vertices)
+    height = zmax - zmin
+    head_thresh = zmin + height * 0.86
+    head_verts = [v for v in mesh.vertices if v.co.z > head_thresh]
+    
+    head_zmin = min(v.co.z for v in head_verts)
+    head_zmax = max(v.co.z for v in head_verts)
+    head_height = head_zmax - head_zmin
+    head_front_y = min(v.co.y for v in head_verts)
+    head_back_y = max(v.co.y for v in head_verts)
+    
+    eye_z_low  = head_zmin + head_height * 0.50
+    eye_z_high = head_zmin + head_height * 0.75
+    eye_y_thresh = head_front_y + (head_back_y - head_front_y) * 0.35
+    
+    eye_socket_verts = [v for v in head_verts
+                        if eye_z_low < v.co.z < eye_z_high
+                        and v.co.y < eye_y_thresh]
+    
+    left_verts  = [v for v in eye_socket_verts if v.co.x > 0.01]
+    right_verts = [v for v in eye_socket_verts if v.co.x < -0.01]
+    
+    def centroid(verts, axis):
+        return sum(getattr(v.co, axis) for v in verts) / len(verts)
+    
+    Y_OFFSET = -0.005
+    
+    if left_verts:
+        lx = centroid(left_verts, 'x')
+        ly = centroid(left_verts, 'y') + Y_OFFSET
+        lz = centroid(left_verts, 'z')
+    else:
+        lx = 0.0366
+        ly = -0.1333
+        lz = 1.5625
+        
+    if right_verts:
+        rx = centroid(right_verts, 'x')
+        ry = centroid(right_verts, 'y') + Y_OFFSET
+        rz = centroid(right_verts, 'z')
+    else:
+        rx = -0.0366
+        ry = -0.1333
+        rz = 1.5625
+
+    iris = make_mat('eye', palette['eye_color'], 0.25)
     white = make_mat('eyewhite', (0.93, 0.93, 0.92), 0.3)
     balls = []
-    for sgn, nm in ((1, 'EyeL'), (-1, 'EyeR')):
-        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.0135, segments=20, ring_count=14,
-                                             location=(eye_x * sgn, eye_y, eye_z))
-        e = bpy.context.active_object
-        e.name = nm
-        e.data.materials.clear()
-        e.data.materials.append(white)
-        e.data.materials.append(iris)
-        # front-facing iris cap = darker
-        for poly in e.data.polygons:
-            cc = Vector((0, 0, 0))
-            for vi in poly.vertices:
-                cc += e.data.vertices[vi].co
-            cc /= len(poly.vertices)
-            if cc.y < e.location.y - 0.006:
-                poly.material_index = 1
-        for poly in e.data.polygons:
-            poly.use_smooth = True
-        balls.append(e)
+    
+    # Left Eye
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.0135, segments=20, ring_count=14, location=(lx, ly, lz))
+    el = bpy.context.active_object
+    el.name = 'EyeL'
+    el.data.materials.clear()
+    el.data.materials.append(white)
+    el.data.materials.append(iris)
+    for poly in el.data.polygons:
+        cc = Vector((0, 0, 0))
+        for vi in poly.vertices:
+            cc += el.data.vertices[vi].co
+        cc /= len(poly.vertices)
+        if cc.y < -0.006:
+            poly.material_index = 1
+    for poly in el.data.polygons:
+        poly.use_smooth = True
+        
+    # Parent to Head bone keeping transform
+    if rig:
+        old_matrix = el.matrix_world.copy()
+        el.parent = rig
+        el.parent_type = 'BONE'
+        el.parent_bone = 'head'
+        el.matrix_world = old_matrix
+        
+    balls.append(el)
+    
+    # Right Eye
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.0135, segments=20, ring_count=14, location=(rx, ry, rz))
+    er = bpy.context.active_object
+    er.name = 'EyeR'
+    er.data.materials.clear()
+    er.data.materials.append(white)
+    er.data.materials.append(iris)
+    for poly in er.data.polygons:
+        cc = Vector((0, 0, 0))
+        for vi in poly.vertices:
+            cc += er.data.vertices[vi].co
+        cc /= len(poly.vertices)
+        if cc.y < -0.006:
+            poly.material_index = 1
+    for poly in er.data.polygons:
+        poly.use_smooth = True
+        
+    # Parent to Head bone keeping transform
+    if rig:
+        old_matrix = er.matrix_world.copy()
+        er.parent = rig
+        er.parent_type = 'BONE'
+        er.parent_bone = 'head'
+        er.matrix_world = old_matrix
+        
+    balls.append(er)
+    
     return balls
 
 
@@ -302,18 +396,56 @@ def build_character(spec):
                                     extra_vertex_groups=True, feet_on_ground=True,
                                     scale=0.1, macro_detail_dict=spec['macro'])
     obj.name = spec['name']
+    
+    # Add game_engine armature rig to rig character body
+    print(f"[{spec['name']}] Adding rig...")
+    rig = HumanService.add_builtin_rig(obj, "game_engine")
+    
+    # Load Clothes, Shoes, Hair using absolute paths
+    clothes_path = os.path.join(BASE_DIR, spec['clothes'])
+    shoes_path = os.path.join(BASE_DIR, spec['shoes'])
+    hair_path = os.path.join(BASE_DIR, spec['hair'])
+    
+    print(f"[{spec['name']}] Loading clothes: {clothes_path}")
+    clothes_obj = HumanService.add_mhclo_asset(clothes_path, obj, asset_type="Clothes")
+    
+    print(f"[{spec['name']}] Loading shoes: {shoes_path}")
+    shoes_obj = HumanService.add_mhclo_asset(shoes_path, obj, asset_type="Clothes")
+    
+    print(f"[{spec['name']}] Loading hair: {hair_path}")
+    hair_obj = HumanService.add_mhclo_asset(hair_path, obj, asset_type="Hair")
+    
+    # Clean the helper vertices from body skin mesh AFTER fitting assets
     delete_non_body(obj)
+    
+    # Build facial shape keys (morph targets) on clean body skin
     head_c, ul_l = build_shapekeys(obj)
-    assign_materials(obj, spec)
+    
+    # Color body skin and lips using textured skin materials
+    skin_path = os.path.join(BASE_DIR, spec['skin_path'])
+    print(f"[{spec['name']}] Loading skin: {skin_path}")
+    HumanService.set_character_skin(skin_path, obj)
+    
     for poly in obj.data.polygons:
         poly.use_smooth = True
-    balls = add_eyeballs(obj, head_c, ul_l, spec)
+        
+    # Generate and place eyeballs parented to head bone
+    balls = add_eyeballs(obj, head_c, ul_l, spec, rig)
 
-    # select body + eyeballs for export
+    # Select all character meshes + rig for GLB export
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
+    if rig:
+        rig.select_set(True)
     for b in balls:
         b.select_set(True)
+    if clothes_obj:
+        clothes_obj.select_set(True)
+    if shoes_obj:
+        shoes_obj.select_set(True)
+    if hair_obj:
+        hair_obj.select_set(True)
+        
     bpy.context.view_layer.objects.active = obj
 
     os.makedirs(OUT_DIR, exist_ok=True)

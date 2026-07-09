@@ -502,6 +502,7 @@ export default function HumanAvatar3D({
         <OrbitControls
           enableZoom={true}
           enablePan={true}
+          target={[0, 0.8, 0]}
           autoRotate={!isPaused}
           autoRotateSpeed={0.3}
           minPolarAngle={Math.PI / 6}
