@@ -2,7 +2,9 @@
 import { Send, MessageSquare, Eye, EyeOff, Pause, Play } from 'lucide-react';
 import VoiceRecorder from './VoiceRecorder.jsx';
 import ImageCapture from './ImageCapture.jsx';
-import HumanAvatar3D from './HumanAvatar3D.jsx';
+import { lazy, Suspense } from 'react';
+import { getPreference, setPreference } from '../lib/preferences.js';
+const HumanAvatar3D = lazy(() => import('./HumanAvatar3D.jsx'));
 import CodePanel from './CodePanel.jsx';
 import useSSE from '../hooks/useSSE.js';
 import useBackgroundAudio from '../hooks/useBackgroundAudio.js';
@@ -12,11 +14,12 @@ import useAvatarAudio from '../hooks/useAvatarAudio.js';
 function getTTSSettings() {
   try {
     return {
-      enabled: localStorage.getItem('tts_enabled') !== 'false',
-      mode: localStorage.getItem('tts_mode') || 'browser',
-      voice: localStorage.getItem('tts_voice') || 'alloy',
-      rate: parseFloat(localStorage.getItem('tts_rate')) || 1.0,
-      voiceURI: localStorage.getItem('tts_voiceURI') || '',
+      enabled: getPreference('tts_enabled') !== 'false',
+      mode: getPreference('tts_mode') || 'browser',
+      voice: getPreference('tts_voice') || 'alloy',
+      rate: parseFloat(getPreference('tts_rate')) || 1.0,
+      voiceURI: getPreference('tts_voiceURI') || '',
+      localOnly: getPreference('tts_local_only') !== 'false',
     };
   } catch {
     return { enabled: true, mode: 'browser', voice: 'alloy', rate: 1.0, voiceURI: '' };
@@ -29,15 +32,34 @@ export default function ChatArea({ character, characterId }) {
   const [pendingImage, setPendingImage] = useState(null);
   const [streamingText, setStreamingText] = useState('');
   const [showAvatar, setShowAvatar] = useState(
-    localStorage.getItem('show_avatar') !== 'false'
+    getPreference('show_avatar') !== 'false'
   );
   const [avatarPaused, setAvatarPaused] = useState(
-    localStorage.getItem('avatar_paused') === 'true'
+    getPreference('avatar_paused') === 'true'
   );
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
-  const { startStream, isStreaming } = useSSE();
-  const { playAudio, speakText, isSpeaking, isPlaying, stopAll, analyserRef } = useBackgroundAudio(character?.name);
+  const { startStream, isStreaming, close: closeStream } = useSSE();
+  const { playAudio, speakText, isSpeaking, isPlaying, stopAll, analyserRef, audioError } = useBackgroundAudio(character?.name);
+  const [ttsError, setTtsError] = useState('');
+  const [speechPending, setSpeechPending] = useState(false);
+  const speechRequest = useRef(null);
+  const conversationGeneration = useRef(0);
+  const imageRequest = useRef(null);
+  const stopSpeech = useCallback(() => {
+    speechRequest.current?.abort();
+    speechRequest.current = null;
+    setSpeechPending(false);
+    stopAll();
+  }, [stopAll]);
+  useEffect(() => {
+    return () => {
+      conversationGeneration.current += 1;
+      closeStream();
+      imageRequest.current?.abort();
+      stopSpeech();
+    };
+  }, [characterId, closeStream, stopSpeech]);
   const { emotion, analyze, reset: resetEmotion } = useSentiment();
   const { amplitudeRef, startSimulation, trackAnalyser, stopTracking } = useAvatarAudio();
 
@@ -45,14 +67,14 @@ export default function ChatArea({ character, characterId }) {
   const toggleAvatar = useCallback(() => {
     const newVal = !showAvatar;
     setShowAvatar(newVal);
-    localStorage.setItem('show_avatar', String(newVal));
+    setPreference('show_avatar', String(newVal));
   }, [showAvatar]);
 
   // Toggle avatar animation (pause to save compute)
   const toggleAvatarPause = useCallback(() => {
     const newVal = !avatarPaused;
     setAvatarPaused(newVal);
-    localStorage.setItem('avatar_paused', String(newVal));
+    setPreference('avatar_paused', String(newVal));
     if (newVal) stopTracking();
   }, [avatarPaused, stopTracking]);
 
@@ -64,12 +86,13 @@ export default function ChatArea({ character, characterId }) {
     resetEmotion();
 
     const fetchMessages = async () => {
+      const generation = conversationGeneration.current;
       try {
         const res = await fetch(`/api/characters/${characterId}/messages`);
         if (res.ok) {
           const data = await res.json();
           const list = Array.isArray(data) ? data : data.messages || [];
-          setMessages(list);
+          if (generation === conversationGeneration.current) setMessages(list);
         }
       } catch (err) {
         console.warn('Could not fetch messages:', err.message);
@@ -89,43 +112,61 @@ export default function ChatArea({ character, characterId }) {
   // the REAL audio amplitude (analyserRef). Browser speechSynthesis exposes no
   // stream, so it falls back to the simulated cadence.
   useEffect(() => {
-    if (isPlaying && analyserRef?.current) {
+    if (avatarPaused || !showAvatar) {
+      stopTracking();
+    } else if (isPlaying && analyserRef?.current) {
       trackAnalyser(analyserRef.current);
     } else if (isSpeaking || isPlaying) {
       startSimulation();
     } else {
       stopTracking();
     }
-  }, [isSpeaking, isPlaying, startSimulation, trackAnalyser, stopTracking, analyserRef]);
+  }, [isSpeaking, isPlaying, avatarPaused, showAvatar, startSimulation, trackAnalyser, stopTracking, analyserRef]);
 
   const speakResponse = useCallback(async (text) => {
+    speechRequest.current?.abort();
     const tts = getTTSSettings();
+    setTtsError('');
     if (!tts.enabled || !text) return;
 
     if (tts.mode === 'cloud') {
+      const controller = new AbortController();
+      speechRequest.current = controller;
+      setSpeechPending(true);
       try {
         const res = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text, voice: tts.voice, speed: tts.rate }),
+          signal: controller.signal,
         });
         if (res.ok) {
           const blob = await res.blob();
+          if (controller.signal.aborted) return;
           await playAudio(blob);
           return;
         }
+        setTtsError('Cloud speech is unavailable. Text remains available; no other speech provider was selected.');
       } catch (err) {
-        console.warn('Cloud TTS error, falling back to browser TTS:', err);
+        if (!controller.signal.aborted) setTtsError('Cloud speech failed. Text remains available; no other speech provider was selected.');
+      } finally {
+        if (speechRequest.current === controller) {
+          speechRequest.current = null;
+          setSpeechPending(false);
+        }
       }
+      return;
     }
 
-    speakText(text, { rate: tts.rate, voiceURI: tts.voiceURI });
+    speakText(text, { rate: tts.rate, voiceURI: tts.voiceURI, localOnly: tts.localOnly });
   }, [playAudio, speakText]);
 
   const handleSend = useCallback(async (overrideText = null) => {
     const text = typeof overrideText === 'string' ? overrideText.trim() : inputText.trim();
     if (!text && !pendingImage) return;
     if (!characterId) return;
+    const generation = conversationGeneration.current;
+    const currentConversation = () => generation === conversationGeneration.current;
 
     const userMessage = {
       id: `msg-${Date.now()}`,
@@ -140,6 +181,9 @@ export default function ChatArea({ character, characterId }) {
     if (inputRef.current) inputRef.current.style.height = 'auto';
 
     if (pendingImage) {
+      imageRequest.current?.abort();
+      const controller = new AbortController();
+      imageRequest.current = controller;
       setPendingImage(null);
       try {
         const formData = new FormData();
@@ -150,6 +194,7 @@ export default function ChatArea({ character, characterId }) {
         const res = await fetch('/api/chat/image', {
           method: 'POST',
           body: formData,
+          signal: controller.signal,
         });
         if (!res.ok) throw new Error('Image chat request failed');
 
@@ -160,6 +205,7 @@ export default function ChatArea({ character, characterId }) {
 
         while (true) {
           const { done, value } = await reader.read();
+          if (!currentConversation()) { await reader.cancel(); return; }
           if (done) break;
           sseBuffer += decoder.decode(value, { stream: true });
           const sseLines = sseBuffer.split('\n');
@@ -180,7 +226,7 @@ export default function ChatArea({ character, characterId }) {
           }
         }
 
-        if (imgAccumulated) {
+        if (imgAccumulated && currentConversation()) {
           setMessages((prev) => [...prev, {
             id: `msg-${Date.now()}-resp`,
             role: 'assistant',
@@ -192,6 +238,7 @@ export default function ChatArea({ character, characterId }) {
           speakResponse(imgAccumulated);
         }
       } catch (err) {
+        if (controller.signal.aborted || !currentConversation()) return;
         console.error('Image chat error:', err);
         setMessages((prev) => [...prev, {
           id: `msg-${Date.now()}-err`,
@@ -208,11 +255,13 @@ export default function ChatArea({ character, characterId }) {
       '/api/chat',
       { character_id: characterId, message: text },
       (chunk) => {
+        if (!currentConversation()) return;
         const newText = chunk.text || chunk.content || chunk.delta || '';
         accumulated += newText;
         setStreamingText(accumulated);
       },
       () => {
+        if (!currentConversation()) return;
         setMessages((prev) => [...prev, {
           id: `msg-${Date.now()}-resp`,
           role: 'assistant',
@@ -318,10 +367,13 @@ export default function ChatArea({ character, characterId }) {
 
   return (
     <div className="chat-area">
+      {(isSpeaking || isPlaying || speechPending) && <div className="audio-notice"><button className="btn btn-secondary" type="button" onClick={stopSpeech}>Stop speech</button></div>}
+      {(audioError || ttsError) && <p className="audio-notice" role="status">{audioError || ttsError}</p>}
       <div className="chat-with-avatar">
         {/* Avatar Panel */}
         {showAvatar && (
           <div className="avatar-panel">
+            <Suspense fallback={<div className="avatar-canvas-wrapper" role="status">Loading 3D renderer…</div>}>
             <HumanAvatar3D
               emotion={emotion}
               amplitudeRef={amplitudeRef}
@@ -333,6 +385,7 @@ export default function ChatArea({ character, characterId }) {
               clothingDescription={character?.clothing_description || ''}
               bodyType={character?.body_type || 'athletic'}
             />
+            </Suspense>
             <div className="avatar-info">
               <span className="avatar-name">{character?.name || 'AI'}</span>
               <span className="avatar-emotion">{emotion}</span>
@@ -347,7 +400,7 @@ export default function ChatArea({ character, characterId }) {
               {avatarPaused ? 'Resume' : 'Pause'}
             </button>
             {/* Zoom hint */}
-            <span className="avatar-zoom-hint" style={{ fontSize: '10px', color: 'var(--text-secondary)', opacity: 0.6 }}>
+            <span className="avatar-zoom-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
               Scroll = zoom · Right-drag = pan · Left-drag = rotate
             </span>
           </div>

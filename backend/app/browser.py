@@ -1,14 +1,17 @@
 """
 AI Companion – Browser Automation Service
 =========================================
-Provides a :class:`BrowserService` that wraps **Playwright** (headless Chromium)
-to give the LLM tool-calling system safe, rate-limited web automation
+Provides a :class:`BrowserService` that wraps **Playwright** (headless Chromium
+by default, optionally Firefox) to give the LLM tool-calling system web automation
 capabilities (navigation, screenshots, clicking, typing, form filling,
 JavaScript execution, and CSS extraction).
 
 Security
 --------
-* Navigation to private / internal IP ranges is blocked (``is_private_url``).
+* Initial URLs and intercepted HTTP(S) requests are checked for non-public
+  addresses, including DNS answers. This is defense in depth, NOT an egress
+  sandbox: DNS rebinding, redirects and non-HTTP traffic need network controls.
+* Contexts grant no permissions, block service workers and disable downloads.
 * Navigations are rate-limited (minimum ``_min_nav_interval`` seconds between
   consecutive navigations) to avoid hammering remote hosts.
 * Playwright is imported lazily so the rest of the app does not pay the import
@@ -21,6 +24,7 @@ import asyncio
 import ipaddress
 import logging
 import re
+import socket
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -35,6 +39,8 @@ _MIN_NAV_INTERVAL: float = 1.0
 _NAV_TIMEOUT_MS: int = 30_000
 # Maximum characters of page text returned by ``navigate``.
 _MAX_TEXT_CHARS: int = 5_000
+# Fail closed rather than holding a browser request indefinitely on DNS.
+_DNS_TIMEOUT_SECONDS: float = 5.0
 
 # Hostname patterns considered private/internal.
 _PRIVATE_HOST_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -53,7 +59,7 @@ _PRIVATE_HOST_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 class BrowserService:
-    """Asynchronous Playwright wrapper for headless Chromium automation.
+    """Asynchronous Playwright wrapper for configurable headless automation.
 
     The browser is started lazily on first use via :meth:`_ensure_started` and
     should be closed with :meth:`close` when no longer needed (e.g. on app
@@ -63,19 +69,26 @@ class BrowserService:
     def __init__(self) -> None:
         self.playwright: Any = None
         self.browser: Any = None
+        self.context: Any = None
         self.page: Any = None
 
         self._nav_timeout_ms: int = _NAV_TIMEOUT_MS
         self._min_nav_interval: float = _MIN_NAV_INTERVAL
         self._last_nav_time: float = 0.0
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Launch headless Chromium and create a new page.
+        """Launch the selected engine, cleaning up partially started resources."""
+        async with self._lifecycle_lock:
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
+        """Start once; caller holds the lifecycle lock.
 
         Playwright is imported lazily so the dependency is only required when
         browser automation is actually used.
@@ -85,33 +98,56 @@ class BrowserService:
             return
 
         settings = get_settings()
+        engine = settings.BROWSER_ENGINE
+        # Settings validates this too; fail closed if callers replace/mutate it.
+        if engine not in ("chromium", "firefox"):
+            raise ValueError("BROWSER_ENGINE must be 'chromium' or 'firefox'.")
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:  # pragma: no cover - environment-dependent
             raise RuntimeError(
                 "Playwright is not installed. Install it with "
-                "`pip install playwright` and run `playwright install chromium`."
+                "`pip install playwright` and run "
+                "`python -m playwright install chromium firefox`."
             ) from exc
 
-        logger.info("Starting headless Chromium browser.")
-        self.playwright = await async_playwright().start()
-
-        launch_args: list[str] = ["--no-sandbox", "--disable-dev-shm-usage"]
+        logger.info("Starting headless %s browser.", engine)
         if settings.PROXY_URL:
-            logger.info("Browser using proxy: %s", settings.PROXY_URL)
-
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=launch_args,
-            proxy={"server": settings.PROXY_URL} if settings.PROXY_URL else None,
-        )
-
-        context = await self.browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent="AI-Companion/1.0 (browser-automation)",
-        )
-        self.page = await context.new_page()
-        self.page.set_default_navigation_timeout(self._nav_timeout_ms)
+            # Never log the proxy URL: userinfo and queries can contain secrets.
+            logger.info("Browser proxy configured.")
+        launch_options: dict[str, Any] = {
+            "headless": True,
+            "proxy": {"server": settings.PROXY_URL} if settings.PROXY_URL else None,
+        }
+        if engine == "chromium":
+            # Retain existing container compatibility; NOT a secure sandbox.
+            # Firefox must not receive Chromium command-line switches.
+            launch_options["args"] = ["--no-sandbox", "--disable-dev-shm-usage"]
+        try:
+            self.playwright = await async_playwright().start()
+            self.browser = await getattr(self.playwright, engine).launch(**launch_options)
+            self.context = await self.browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                user_agent="AI-Companion/1.0 (browser-automation)",
+                permissions=[],
+                service_workers="block",
+                accept_downloads=False,
+            )
+            # Context routing covers popups/frames as well as the primary page.
+            # Service workers are blocked because they can bypass page routing.
+            await self.context.route("**/*", self._route_request)
+            self.page = await self.context.new_page()
+            self.page.set_default_navigation_timeout(self._nav_timeout_ms)
+        except asyncio.CancelledError:
+            await self._close_resources()
+            raise
+        except Exception:
+            await self._close_resources()
+            # Playwright launch errors may include proxy credentials or args.
+            logger.warning("Browser startup failed; resources released.")
+            raise RuntimeError(
+                "Browser startup failed. Check engine installation and proxy configuration."
+            ) from None
         logger.info("Browser ready (viewport 1280x720).")
 
     async def _ensure_started(self) -> None:
@@ -120,43 +156,75 @@ class BrowserService:
             await self.start()
 
     async def close(self) -> None:
-        """Close the browser and shut down Playwright."""
-        if self.browser is not None:
-            try:
-                await self.browser.close()
-            except Exception:
-                logger.exception("Error closing browser.")
-            self.browser = None
-        if self.playwright is not None:
-            try:
-                await self.playwright.stop()
-            except Exception:
-                logger.exception("Error stopping playwright.")
-            self.playwright = None
-        self.page = None
+        """Close context, browser and Playwright; safe to call more than once."""
+        async with self._lifecycle_lock:
+            await self._close_resources()
         logger.info("Browser closed.")
+
+    async def _close_resources(self) -> None:
+        """Attempt every cleanup even if an earlier resource fails to close."""
+        context, browser, playwright = self.context, self.browser, self.playwright
+        self.context = self.browser = self.playwright = None
+        self.page = None
+        self._last_nav_time = 0.0
+        cancelled = False
+        for resource, method, label in (
+            (context, "close", "context"),
+            (browser, "close", "browser"),
+            (playwright, "stop", "Playwright"),
+        ):
+            if resource is not None:
+                try:
+                    await getattr(resource, method)()
+                except asyncio.CancelledError:
+                    # Still release remaining resources, then honor cancellation.
+                    cancelled = True
+                except Exception:
+                    # Raw browser exceptions can disclose URL/proxy secrets.
+                    logger.warning("Error closing %s.", label)
+        if cancelled:
+            raise asyncio.CancelledError
 
     # ------------------------------------------------------------------
     # Security helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def is_private_url(url: str) -> bool:
-        """Return ``True`` if *url* points at a private/internal host.
+    def _is_public_address(address: str) -> bool:
+        """Accept globally routable unicast only, including mapped IPv4 checks."""
+        ip = ipaddress.ip_address(address)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return ip.is_global and not ip.is_multicast and not ip.is_reserved
 
-        Checks against common private IPv4 ranges, loopback, link-local, and
-        ``localhost`` hostnames.  Non-HTTP(S) schemes are also rejected.
+    @staticmethod
+    def is_private_url(url: str) -> bool:
+        """Conservative syntactic check; DNS is checked separately before use.
+
+        Reject non-HTTP(S), credentials, ambiguous URL syntax and literal
+        non-public addresses. A False result does NOT mean DNS is safe.
         """
+        if not isinstance(url, str) or not url:
+            return True
+        # Avoid differences between Python URL parsing and browser URL parsing.
+        if "\\" in url or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+            return True
         try:
             parsed = urlparse(url)
-        except Exception:
+            host = (parsed.hostname or "").rstrip(".").lower()
+            port = parsed.port  # also validates malformed/out-of-range ports
+        except ValueError:
             return True  # treat unparseable URLs as unsafe
 
-        if parsed.scheme not in ("http", "https"):
+        if parsed.scheme not in ("http", "https") or port == 0:
             return True
 
-        host = (parsed.hostname or "").strip("[]")
-        if not host:
+        if not host or parsed.username is not None or parsed.password is not None:
+            return True
+        # Percent-encoded hosts and IPv6 scope IDs introduce parser ambiguity.
+        if "%" in host:
+            return True
+        if host.endswith((".local", ".internal")):
             return True
 
         # Hostname-based patterns (localhost etc.).
@@ -166,15 +234,72 @@ class BrowserService:
 
         # Try IP-based detection for literal addresses.
         try:
-            ip = ipaddress.ip_address(host)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                return True
+            return not BrowserService._is_public_address(host)
         except ValueError:
-            # Not an IP literal (it's a DNS name) – hostname patterns above
-            # already covered `localhost`; allow other DNS names.
-            pass
-
+            # Validate IDNA names conservatively; no search-domain shortnames.
+            try:
+                ascii_host = host.encode("idna").decode("ascii")
+            except UnicodeError:
+                return True
+            labels = ascii_host.split(".")
+            if len(labels) < 2 or len(ascii_host) > 253:
+                return True
+            if any(not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+                   for label in labels):
+                return True
         return False
+
+    async def _check_request_url_safe(self, url: str) -> Optional[str]:
+        """Fail closed unless ALL locally resolved addresses are public.
+
+        Resolution is deliberately not cached here. Browser/proxy DNS may
+        differ or change between check and connect; enforce egress separately.
+        """
+        error = self._check_url_safe(url)
+        if error:
+            return error
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").rstrip(".")
+        try:
+            ipaddress.ip_address(host)
+            return None  # literal already checked by _check_url_safe
+        except ValueError:
+            pass
+        try:
+            addresses = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(
+                    host.encode("idna").decode("ascii"),
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                ),
+                timeout=_DNS_TIMEOUT_SECONDS,
+            )
+            if not addresses or any(
+                not self._is_public_address(info[4][0]) for info in addresses
+            ):
+                return "Blocked request: destination is not a public address."
+        except (OSError, ValueError, UnicodeError, asyncio.TimeoutError):
+            return "Blocked request: destination could not be safely resolved."
+        return None
+
+    async def _route_request(self, route: Any) -> None:
+        """Check each intercepted HTTP request, including frames/subresources.
+
+        Playwright routing is not complete network mediation (in particular,
+        redirect chains and WebSockets must not be assumed to be covered).
+        """
+        try:
+            error = await self._check_request_url_safe(route.request.url)
+            if error:
+                await route.abort("blockedbyclient")
+            else:
+                await route.continue_()
+        except Exception:
+            logger.warning("Browser request guard failed; blocking request.")
+            try:
+                await route.abort("blockedbyclient")
+            except Exception:
+                logger.warning("Could not abort browser request (page may be closed).")
 
     async def _rate_limit(self) -> None:
         """Sleep if necessary to enforce the minimum navigation interval."""
@@ -189,7 +314,7 @@ class BrowserService:
         if not url or not isinstance(url, str):
             return "Invalid URL: empty or non-string."
         if self.is_private_url(url):
-            return f"Blocked navigation to private/internal URL: {url}"
+            return "Blocked URL: only unambiguous public HTTP(S) destinations are allowed."
         return None
 
     # ------------------------------------------------------------------
@@ -202,7 +327,7 @@ class BrowserService:
         Returns a dict with ``title``, ``url``, and ``text_content`` (first
         ``_MAX_TEXT_CHARS`` characters of visible text).
         """
-        err = self._check_url_safe(url)
+        err = await self._check_request_url_safe(url)
         if err:
             return {"error": err}
 
@@ -213,9 +338,9 @@ class BrowserService:
             await self._rate_limit()
             try:
                 await self.page.goto(url, wait_until="domcontentloaded")
-            except Exception as exc:
-                logger.exception("Navigation to %s failed.", url)
-                return {"error": f"Navigation failed: {exc}"}
+            except Exception:
+                logger.warning("Browser navigation failed.")
+                return {"error": "Navigation failed or was blocked by the browser request guard."}
 
         title: str = await self.page.title()
         final_url: str = self.page.url
@@ -239,7 +364,7 @@ class BrowserService:
         and rate limiting).  Returns the raw PNG bytes.
         """
         if url is not None:
-            err = self._check_url_safe(url)
+            err = await self._check_request_url_safe(url)
             if err:
                 raise ValueError(err)
             await self._ensure_started()
@@ -248,9 +373,9 @@ class BrowserService:
                 await self._rate_limit()
                 try:
                     await self.page.goto(url, wait_until="domcontentloaded")
-                except Exception as exc:
-                    logger.exception("Screenshot navigation to %s failed.", url)
-                    raise RuntimeError(f"Navigation failed: {exc}") from exc
+                except Exception:
+                    logger.warning("Screenshot navigation failed.")
+                    raise RuntimeError("Screenshot navigation failed or was blocked.") from None
         else:
             await self._ensure_started()
             assert self.page is not None
@@ -267,9 +392,9 @@ class BrowserService:
         try:
             await self.page.click(selector, timeout=self._nav_timeout_ms)
             return {"success": True, "error": None}
-        except Exception as exc:
-            logger.warning("Click on '%s' failed: %s", selector, exc)
-            return {"success": False, "error": str(exc)}
+        except Exception:
+            logger.warning("Browser click failed.")
+            return {"success": False, "error": "Browser click failed."}
 
     async def type_text(self, selector: str, text: str) -> dict[str, Any]:
         """Type *text* into the element matching *selector* (CSS).
@@ -281,9 +406,9 @@ class BrowserService:
         try:
             await self.page.fill(selector, text, timeout=self._nav_timeout_ms)
             return {"success": True, "error": None}
-        except Exception as exc:
-            logger.warning("Type into '%s' failed: %s", selector, exc)
-            return {"success": False, "error": str(exc)}
+        except Exception:
+            logger.warning("Browser text entry failed.")
+            return {"success": False, "error": "Browser text entry failed."}
 
     async def extract(self, selectors: dict[str, str]) -> dict[str, str]:
         """Extract text content from multiple CSS selectors.
@@ -302,8 +427,8 @@ class BrowserService:
                     result[name] = ""
                 else:
                     result[name] = (await element.inner_text()) or ""
-            except Exception as exc:
-                logger.warning("Extract '%s' (selector '%s') failed: %s", name, css, exc)
+            except Exception:
+                logger.warning("Browser text extraction failed.")
                 result[name] = ""
         return result
 
@@ -313,9 +438,9 @@ class BrowserService:
         assert self.page is not None
         try:
             return await self.page.evaluate(script)
-        except Exception as exc:
-            logger.exception("JavaScript execution failed.")
-            return {"error": str(exc)}
+        except Exception:
+            logger.warning("JavaScript execution failed.")
+            return {"error": "JavaScript execution failed."}
 
     async def fill_form(
         self, url: str, form_data: dict[str, str]

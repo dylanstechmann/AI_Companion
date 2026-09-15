@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""
     PROXY_URL: str = ""
     CRAWL_DELAY_SECONDS: float = 2.0
+    # Backend automation only; does not select the user's frontend/PWA browser.
+    BROWSER_ENGINE: Literal["chromium", "firefox"] = "chromium"
 
     # ---- Text-to-Speech ------------------------------------------------------
     # Separate API key for TTS (OpenAI-compatible).  Falls back to

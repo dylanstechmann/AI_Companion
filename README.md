@@ -1,6 +1,45 @@
 # 🤖 AI Companion
 
-> A private, self-hosted AI assistant with persistent memory, voice interaction, and agentic capabilities — accessible as a PWA from any device, including instant launch via the iPhone Action Button.
+> A self-hosted AI companion prototype with memory, voice, browser tools, and animated 3D avatars. Self-hosting does not make configured cloud providers local or private.
+
+> [!WARNING]
+> Do not expose this prototype's backend to the public internet. Authentication, per-user ownership, and code/skill execution isolation remain incomplete. The existing execution environment is not a hardened sandbox. Read the [browser and privacy audit](docs/browser-privacy-audit.md) before deploying or entering sensitive information.
+
+## Avatar, browser, and privacy update
+
+- Repaired bundled eye placement and appearance; preserved body morphs and isolated skeletons.
+- Added portrait/body framing, reset, rendering-quality controls, and reduced-motion/visibility-aware demand rendering.
+- Added cross-browser recorder format detection, cancellation-safe voice playback, and local-only browser voices by default.
+- Removed remote font loading and sensitive API runtime caching. Preferences now last for the current page session, not across reloads.
+- Added an optional Firefox backend automation engine, independent of which browser opens the frontend.
+
+See the [implementation and validation report](docs/avatar-firefox-update.md) for exact scope, test results, and remaining limitations.
+
+### Safe visual preview
+
+```bash
+cd frontend
+npm ci
+npm run dev
+# Open http://localhost:3000/#avatar-studio
+```
+
+The avatar studio does not connect chat, microphone, or AI providers. `npm run build:studio` creates a separate static visual preview in `frontend/dist-studio`; `npm run build` creates the normal companion frontend.
+
+### Validation
+
+```bash
+cd frontend
+npm test
+npm run build
+npx playwright install chromium firefox
+npm run test:e2e
+cd ..
+python -m pip install pydantic-settings
+PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s backend/tests -v
+```
+
+Browser tests use mocked backend responses, not real API credentials. Firefox rendering checks that require WebGL are excluded in the headless test environment; physical Firefox GPU, microphone, and Safari/iOS testing remains necessary.
 
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496EDlogo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776ABlogo=python&logoColor=white)](https://python.org)
@@ -57,7 +96,7 @@
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/AI_Companion.git
+git clone https://github.com/dylanstechmann/AI_Companion.git
 cd AI_Companion
 
 # 2. Create your environment file
@@ -101,6 +140,15 @@ The backend exposes a RESTful API at `http://localhost:8000`. Full interactive d
 ---
 
 ## 📲 PWA Installation
+
+Use HTTPS outside localhost. Installation UI depends on browser and platform; the app's Settings → Browser & privacy panel explains detected capabilities. Offline support covers the app shell, not working offline AI/chat, and does not precache the large avatar models.
+
+### Firefox
+
+- Firefox on Android can use its install/add-to-home-screen menu where available.
+- Firefox on Windows supports web apps starting with Firefox 143; Microsoft Store builds require Firefox 150 or later. Firefox on macOS/Linux can use the app in a normal tab or bookmark instead. See [Mozilla's current Windows web-app guidance](https://support.mozilla.org/en-US/kb/web-apps-firefox-windows).
+- To use Firefox for the backend's separate Playwright browser tool, set `BROWSER_ENGINE=firefox` in `.env` and rebuild the backend container. Both engine binaries are installed; Chromium remains the default.
+- Switching browser engines does not change the configured chat, embedding, or cloud speech providers. URL checks are defense-in-depth, not a complete network sandbox.
 
 ### Desktop (Chrome / Edge)
 1. Navigate to `http://localhost:3000`
