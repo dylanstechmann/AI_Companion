@@ -1,325 +1,299 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  cleanSpeechText, createMediaGeneration, decodeMediaAudio, selectSpeechVoice,
+  registerMediaActions, setMediaPlaybackState,
+} from '../lib/mediaPlayback.js';
 
 /**
- * useBackgroundAudio — Manages TTS audio playback with Web Audio API
- * and navigator.mediaSession for lock-screen controls.
- *
- * Supports two TTS modes:
- *   - "browser": uses window.speechSynthesis (free, offline, robotic)
- *   - "cloud":   fetches audio from /api/tts and plays via Web Audio API
- *
- * Usage:
- *   const { playAudio, stopAudio, isPlaying, speakText, stopSpeaking, isSpeaking, getAvailableVoices } = useBackgroundAudio(characterName);
+ * Audio is transient. No silent keepalive, storage, or implicit remote TTS.
+ * playAudio resolves true only after playback starts; false on cancellation or
+ * failure (audioError describes failures). speakText returns true when queued,
+ * false on failure; later browser errors also appear in audioError.
  */
 export default function useBackgroundAudio(characterName = 'AI Companion') {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false); // browser TTS active
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [audioError, setAudioError] = useState('');
+  const mountedRef = useRef(true);
   const audioContextRef = useRef(null);
   const currentSourceRef = useRef(null);
-  const silentIntervalRef = useRef(null);
-  const audioElementRef = useRef(null);
-  const voicesRef = useRef([]);
-  // AnalyserNode for the currently-playing cloud-TTS clip. Exposed so the
-  // avatar can lip-sync to the REAL audio amplitude instead of a simulation.
+  const utteranceRef = useRef(null);
   const analyserRef = useRef(null);
+  const voicesRef = useRef([]);
+  const audioGeneration = useRef(createMediaGeneration());
+  const speechGeneration = useRef(createMediaGeneration());
+  const fetchControllerRef = useRef(null);
+  const audioPausedRef = useRef(false);
+  const speechPausedRef = useRef(false);
+  const session = typeof navigator !== 'undefined' ? navigator.mediaSession : null;
 
-  // Initialize AudioContext lazily (requires user gesture)
-  const getAudioContext = useCallback(() => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (audioContextRef.current.state === 'suspended') {
-      audioContextRef.current.resume();
-    }
-    return audioContextRef.current;
+  const reportError = useCallback((message) => {
+    if (mountedRef.current) setAudioError(message);
   }, []);
 
-  // Set up media session metadata
-  useEffect(() => {
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: 'AI Companion',
-        artist: characterName,
-        album: 'AI Companion',
-      });
+  const syncSession = useCallback(() => {
+    const playing = (currentSourceRef.current && !audioPausedRef.current) ||
+      (utteranceRef.current && !speechPausedRef.current);
+    const paused = currentSourceRef.current || utteranceRef.current;
+    setMediaPlaybackState(session, playing ? 'playing' : paused ? 'paused' : 'none');
+  }, [session]);
 
-      navigator.mediaSession.setActionHandler('play', () => {
-        setIsPlaying(true);
-      });
-
-      navigator.mediaSession.setActionHandler('pause', () => {
-        stopAudio();
-      });
-
-      navigator.mediaSession.setActionHandler('stop', () => {
-        stopAudio();
-      });
-    }
-  }, [characterName]);
-
-  // ── Voice loading for browser TTS ──────────────────────────────────
-  useEffect(() => {
-    if (!('speechSynthesis' in window)) return;
-
-    const loadVoices = () => {
-      voicesRef.current = window.speechSynthesis.getVoices();
-    };
-
-    loadVoices();
-    window.speechSynthesis.onvoiceschanged = loadVoices;
-
-    return () => {
-      window.speechSynthesis.cancel();
-    };
-  }, []);
-
-  // Play silent audio to keep the app alive in background (iOS/Android)
-  const startSilentKeepAlive = useCallback(() => {
-    if (silentIntervalRef.current) return;
-
-    // Create a silent audio element for background keep-alive
-    if (!audioElementRef.current) {
-      const audio = new Audio();
-      // Tiny silent WAV (base64)
-      audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-      audio.loop = true;
-      audio.volume = 0.01;
-      audioElementRef.current = audio;
-    }
-
-    audioElementRef.current.play().catch(() => {
-      // Autoplay blocked — will activate on next user interaction
-    });
-
-    silentIntervalRef.current = setInterval(() => {
-      const ctx = audioContextRef.current;
-      if (ctx && ctx.state === 'running') {
-        const oscillator = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.gain.value = 0; // Silent
-        oscillator.connect(gain);
-        gain.connect(ctx.destination);
-        oscillator.start();
-        oscillator.stop(ctx.currentTime + 0.001);
-      }
-    }, 25000); // Every 25 seconds
-  }, []);
-
-  const stopSilentKeepAlive = useCallback(() => {
-    if (silentIntervalRef.current) {
-      clearInterval(silentIntervalRef.current);
-      silentIntervalRef.current = null;
-    }
-    if (audioElementRef.current) {
-      audioElementRef.current.pause();
-    }
-  }, []);
-
-  /**
-   * Play audio from an ArrayBuffer or Blob (cloud TTS response).
-   */
-  const playAudio = useCallback(async (audioData) => {
-    try {
-      const ctx = getAudioContext();
-
-      // Stop any currently playing audio (including browser TTS)
-      stopSpeaking();
-
-      if (currentSourceRef.current) {
-        try {
-          currentSourceRef.current.stop();
-        } catch {
-          // Already stopped
-        }
-      }
-
-      let arrayBuffer;
-      if (audioData instanceof Blob) {
-        arrayBuffer = await audioData.arrayBuffer();
-      } else if (audioData instanceof ArrayBuffer) {
-        arrayBuffer = audioData;
-      } else if (typeof audioData === 'string') {
-        // URL — fetch the audio
-        const response = await fetch(audioData);
-        arrayBuffer = await response.arrayBuffer();
-      } else {
-        throw new Error('Unsupported audio data format');
-      }
-
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-
-      // Route through an AnalyserNode so consumers can read real-time amplitude
-      // for accurate lip-sync: source -> analyser -> speakers.
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.6;
-      source.connect(analyser);
-      analyser.connect(ctx.destination);
-      analyserRef.current = analyser;
-
-      source.onended = () => {
-        setIsPlaying(false);
-        currentSourceRef.current = null;
-        analyserRef.current = null;
-        if ('mediaSession' in navigator) {
-          navigator.mediaSession.playbackState = 'paused';
-        }
-      };
-
-      currentSourceRef.current = source;
-      source.start(0);
-      setIsPlaying(true);
-      startSilentKeepAlive();
-
-      if ('mediaSession' in navigator) {
-        navigator.mediaSession.playbackState = 'playing';
-      }
-    } catch (err) {
-      console.error('Audio playback error:', err);
-      setIsPlaying(false);
-    }
-  }, [getAudioContext, startSilentKeepAlive]);
-
-  /**
-   * Stop all audio playback (cloud TTS).
-   */
   const stopAudio = useCallback(() => {
-    if (currentSourceRef.current) {
-      try {
-        currentSourceRef.current.stop();
-      } catch {
-        // Already stopped
-      }
-      currentSourceRef.current = null;
+    audioGeneration.current.next();
+    fetchControllerRef.current?.abort();
+    fetchControllerRef.current = null;
+    const source = currentSourceRef.current;
+    currentSourceRef.current = null;
+    if (source) {
+      source.onended = null;
+      try { source.stop(); } catch { /* Source already finished. */ }
+      try { source.disconnect(); } catch { /* Already disconnected. */ }
     }
+    try { analyserRef.current?.disconnect(); } catch { /* Already disconnected. */ }
     analyserRef.current = null;
-    setIsPlaying(false);
-    stopSilentKeepAlive();
+    audioPausedRef.current = false;
+    if (mountedRef.current) setIsPlaying(false);
+    syncSession();
+  }, [syncSession]);
 
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = 'paused';
-    }
-  }, [stopSilentKeepAlive]);
-
-  // ── Browser-native TTS (SpeechSynthesis API) ───────────────────────
-
-  /**
-   * Speak text using the browser's built-in speechSynthesis.
-   * Strips markdown/code blocks for cleaner speech.
-   *
-   * @param {string} text - The text to speak
-   * @param {object} options - { rate, pitch, volume, voiceURI, lang }
-   */
-  const speakText = useCallback((text, options = {}) => {
-    if (!('speechSynthesis' in window)) {
-      console.warn('SpeechSynthesis not supported in this browser');
-      return;
-    }
-
-    // Cancel any ongoing speech or cloud audio
-    window.speechSynthesis.cancel();
-    stopAudio();
-
-    // Strip markdown for cleaner speech
-    const cleanText = text
-      .replace(/```[\s\S]*?```/g, ' code block ')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/!\[.*?\]\(.*?\)/g, '')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-      .replace(/[#*_~>]/g, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    if (!cleanText) return;
-
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.rate = options.rate ?? 1.0;
-    utterance.pitch = options.pitch ?? 1.0;
-    utterance.volume = options.volume ?? 1.0;
-
-    // Select voice
-    const voices = voicesRef.current.length
-      ? voicesRef.current
-      : window.speechSynthesis.getVoices();
-    if (options.voiceURI) {
-      const voice = voices.find((v) => v.voiceURI === options.voiceURI);
-      if (voice) utterance.voice = voice;
-    } else if (options.lang) {
-      const voice = voices.find((v) => v.lang.startsWith(options.lang));
-      if (voice) utterance.voice = voice;
-    }
-
-    utterance.onstart = () => {
-      setIsSpeaking(true);
-      startSilentKeepAlive();
-    };
-
-    utterance.onend = () => {
-      setIsSpeaking(false);
-      stopSilentKeepAlive();
-    };
-
-    utterance.onerror = (event) => {
-      console.error('Speech synthesis error:', event.error);
-      setIsSpeaking(false);
-      stopSilentKeepAlive();
-    };
-
-    window.speechSynthesis.speak(utterance);
-  }, [startSilentKeepAlive, stopAudio, stopSilentKeepAlive]);
-
-  /**
-   * Stop browser TTS playback.
-   */
   const stopSpeaking = useCallback(() => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+    speechGeneration.current.next();
+    const utterance = utteranceRef.current;
+    utteranceRef.current = null;
+    if (utterance) {
+      utterance.onstart = utterance.onend = utterance.onerror = utterance.onpause = utterance.onresume = null;
+      try { window.speechSynthesis?.cancel(); } catch { /* Browser shutting down. */ }
     }
-    setIsSpeaking(false);
-  }, []);
+    speechPausedRef.current = false;
+    if (mountedRef.current) setIsSpeaking(false);
+    syncSession();
+  }, [syncSession]);
 
-  /**
-   * Get available browser TTS voices.
-   */
-  const getAvailableVoices = useCallback(() => {
-    if (!('speechSynthesis' in window)) return [];
-    return voicesRef.current.length
-      ? voicesRef.current
-      : window.speechSynthesis.getVoices();
-  }, []);
-
-  /**
-   * Stop ALL audio (both cloud and browser TTS).
-   */
   const stopAll = useCallback(() => {
     stopAudio();
     stopSpeaking();
   }, [stopAudio, stopSpeaking]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stopAudio();
-      stopSpeaking();
-      stopSilentKeepAlive();
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
+  const playAudio = useCallback(async (audioData) => {
+    if (!mountedRef.current) return false;
+    stopAll();
+    reportError('');
+    const token = audioGeneration.current.next();
+    const current = () => mountedRef.current && audioGeneration.current.isCurrent(token);
+    let source = null;
+    let analyser = null;
+    let requestController = null;
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (typeof AudioContext !== 'function') throw new Error('Audio playback is unavailable in this browser.');
+      let ctx = audioContextRef.current;
+      if (!ctx || ctx.state === 'closed') {
+        ctx = new AudioContext();
+        audioContextRef.current = ctx;
       }
-    };
+      if (ctx.state !== 'running') await ctx.resume();
+      if (!current()) return false;
+      if (ctx.state !== 'running') throw new Error('Playback is blocked. Click a playback control to try again.');
+
+      let bytes;
+      if (audioData instanceof Blob) bytes = await audioData.arrayBuffer();
+      else if (audioData instanceof ArrayBuffer) bytes = audioData.slice(0);
+      else if (typeof audioData === 'string') {
+        requestController = new AbortController();
+        fetchControllerRef.current = requestController;
+        const response = await fetch(audioData, { signal: requestController.signal });
+        if (!response.ok) throw new Error(`Audio download failed (${response.status}).`);
+        bytes = await response.arrayBuffer();
+      } else throw new Error('Unsupported audio data format.');
+      if (!current()) return false;
+      const buffer = await decodeMediaAudio(ctx, bytes);
+      // stopAll, a replacement clip, or unmount may have happened during decode.
+      if (!current()) return false;
+      if (ctx.state !== 'running') await ctx.resume();
+      if (!current()) return false;
+      if (ctx.state !== 'running') throw new Error('Playback is suspended. Click a playback control to try again.');
+      source = ctx.createBufferSource();
+      source.buffer = buffer;
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.6;
+      source.connect(analyser);
+      analyser.connect(ctx.destination);
+      source.onended = () => {
+        try { source.disconnect(); analyser.disconnect(); } catch { /* Already disconnected. */ }
+        // An older source's queued end event must never clear a newer source.
+        if (!current() || currentSourceRef.current !== source) return;
+        currentSourceRef.current = null;
+        analyserRef.current = null;
+        audioPausedRef.current = false;
+        setIsPlaying(false);
+        syncSession();
+      };
+      currentSourceRef.current = source;
+      analyserRef.current = analyser;
+      source.start(0);
+      setIsPlaying(true);
+      syncSession();
+      return true;
+    } catch (error) {
+      try { source?.disconnect(); analyser?.disconnect(); } catch { /* Cleanup continues. */ }
+      if (current()) {
+        stopAudio();
+        reportError(error?.message || 'Audio playback failed. Try another voice or browser.');
+      }
+      return false;
+    } finally {
+      if (fetchControllerRef.current === requestController) fetchControllerRef.current = null;
+    }
+  }, [stopAll, stopAudio, reportError, syncSession]);
+
+  const getAvailableVoices = useCallback(() => {
+    try {
+      voicesRef.current = window.speechSynthesis?.getVoices() || [];
+      return [...voicesRef.current];
+    } catch { return []; }
   }, []);
 
+  useEffect(() => {
+    const synth = window.speechSynthesis;
+    if (!synth) return undefined;
+    getAvailableVoices();
+    // Do not overwrite Settings or another component's listener.
+    synth.addEventListener?.('voiceschanged', getAvailableVoices);
+    return () => synth.removeEventListener?.('voiceschanged', getAvailableVoices);
+  }, [getAvailableVoices]);
+
+  const speakText = useCallback((text, options = {}) => {
+    if (!mountedRef.current) return false;
+    stopAll();
+    reportError('');
+    const token = speechGeneration.current.next();
+    const current = () => mountedRef.current && speechGeneration.current.isCurrent(token);
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth || typeof window.SpeechSynthesisUtterance !== 'function') {
+        throw new Error('Browser speech playback is unavailable in this browser.');
+      }
+      const cleanText = cleanSpeechText(text);
+      if (!cleanText) return false;
+      const voice = selectSpeechVoice(getAvailableVoices(), options);
+      const utterance = new window.SpeechSynthesisUtterance(cleanText);
+      utterance.voice = voice; // Always explicit, including when localOnly defaults true.
+      utterance.lang = options.lang || voice.lang;
+      utterance.rate = options.rate ?? 1;
+      utterance.pitch = options.pitch ?? 1;
+      utterance.volume = options.volume ?? 1;
+      utteranceRef.current = utterance;
+      const isOwn = () => current() && utteranceRef.current === utterance;
+      const finished = (event) => {
+        if (!isOwn()) return;
+        utteranceRef.current = null;
+        speechPausedRef.current = false;
+        utterance.onstart = utterance.onend = utterance.onerror = utterance.onpause = utterance.onresume = null;
+        setIsSpeaking(false);
+        syncSession();
+        if (event?.error && !['canceled', 'interrupted'].includes(event.error)) {
+          reportError(`Browser speech failed (${event.error}). Choose an available voice or try again.`);
+        }
+      };
+      utterance.onstart = () => {
+        if (isOwn()) { setIsSpeaking(true); syncSession(); }
+      };
+      utterance.onend = finished;
+      utterance.onerror = finished;
+      utterance.onpause = () => {
+        if (isOwn()) { speechPausedRef.current = true; setIsSpeaking(false); syncSession(); }
+      };
+      utterance.onresume = () => {
+        if (isOwn()) { speechPausedRef.current = false; setIsSpeaking(true); syncSession(); }
+      };
+      // Mark active while queued as well, so VAD never captures the start of TTS.
+      setIsSpeaking(true);
+      if (synth.paused) synth.resume();
+      synth.speak(utterance);
+      syncSession();
+      return true;
+    } catch (error) {
+      if (current()) {
+        stopSpeaking();
+        reportError(error?.message || 'Browser speech playback failed.');
+      }
+      return false;
+    }
+  }, [stopAll, stopSpeaking, reportError, getAvailableVoices, syncSession]);
+
+  const pause = useCallback(async () => {
+    try {
+      if (utteranceRef.current) {
+        window.speechSynthesis.pause();
+        speechPausedRef.current = true;
+        if (mountedRef.current) setIsSpeaking(false);
+      }
+      const source = currentSourceRef.current;
+      if (source) {
+        await audioContextRef.current.suspend();
+        if (mountedRef.current && currentSourceRef.current === source) {
+          audioPausedRef.current = true;
+          setIsPlaying(false);
+        }
+      }
+      syncSession();
+    } catch { reportError('This browser could not pause playback. Use Stop instead.'); }
+  }, [reportError, syncSession]);
+
+  const resume = useCallback(async () => {
+    try {
+      if (utteranceRef.current && speechPausedRef.current) {
+        window.speechSynthesis.resume();
+        speechPausedRef.current = false;
+        if (mountedRef.current) setIsSpeaking(true);
+      }
+      const source = currentSourceRef.current;
+      if (source && audioPausedRef.current) {
+        const ctx = audioContextRef.current;
+        await ctx.resume();
+        if (mountedRef.current && currentSourceRef.current === source) {
+          if (ctx.state !== 'running') throw new Error('Playback remains suspended.');
+          audioPausedRef.current = false;
+          setIsPlaying(true);
+        }
+      }
+      syncSession(); // No source/utterance means no fictitious "playing" state.
+    } catch { reportError('This browser could not resume playback. Try playing the message again.'); }
+  }, [reportError, syncSession]);
+
+  useEffect(() => {
+    if (!session) return undefined;
+    let metadata = null;
+    try {
+      if (typeof window.MediaMetadata === 'function') {
+        metadata = new window.MediaMetadata({ title: 'AI Companion', artist: characterName, album: 'AI Companion' });
+        session.metadata = metadata;
+      }
+    } catch { /* Metadata is optional, even if mediaSession exists. */ }
+    const unregister = registerMediaActions(session, {
+      play: () => { void resume(); }, pause: () => { void pause(); }, stop: stopAll,
+    });
+    return () => {
+      unregister();
+      try { if (metadata && session.metadata === metadata) session.metadata = null; } catch { /* Optional API. */ }
+    };
+  }, [characterName, session, pause, resume, stopAll]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopAll();
+      const ctx = audioContextRef.current;
+      audioContextRef.current = null;
+      try { Promise.resolve(ctx?.close()).catch(() => {}); } catch { /* Already closed. */ }
+      voicesRef.current = [];
+    };
+  }, [stopAll]);
+
   return {
-    playAudio,
-    stopAudio,
-    isPlaying,
-    speakText,
-    stopSpeaking,
-    isSpeaking,
-    getAvailableVoices,
-    stopAll,
-    analyserRef,
+    playAudio, stopAudio, isPlaying, speakText, stopSpeaking, isSpeaking,
+    getAvailableVoices, stopAll, analyserRef, audioError,
   };
 }

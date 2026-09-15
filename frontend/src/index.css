@@ -5,6 +5,14 @@
    ============================================ */
 
 /* ----- Design Tokens ----- */
+.capability-list { margin: 16px 0; font-size: 12px; }
+.capability-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--border-glass); }
+.capability-list dd { text-align: right; color: var(--text-secondary); }
+.browser-privacy .settings-hint { margin-bottom: 12px; line-height: 1.65; }
+.audio-notice { padding: 8px 16px; font-size: 12px; color: var(--warning); background: var(--bg-secondary); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+}
 :root {
   /* Backgrounds */
   --bg-primary: #0a0a1a;
