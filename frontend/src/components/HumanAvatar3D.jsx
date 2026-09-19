@@ -1,408 +1,524 @@
-import {
-  Component, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
-} from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Environment, Lightformer, OrbitControls, useGLTF } from '@react-three/drei';
+import { useRef, useState, useEffect, useMemo, Suspense, useCallback, Component } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
+import { OrbitControls, useGLTF, Environment, Lightformer, ContactShadows } from '@react-three/drei';
 import * as THREE from 'three';
-import {
-  QUALITY_PRESETS, applyFacialTargets, avatarAssetType, blinkWeight, cameraFrame,
-  clamp, damp, dampingFactor, facialTargets, frameDelta, shouldAnimate,
-} from '../lib/avatarMath.js';
-import { poseJoint, prepareAvatar, releaseAvatar } from '../lib/avatarModel.js';
-import { createAvatarShadow } from '../lib/avatarShadow.js';
-import { avatarWebGLAvailable } from '../lib/avatarCapabilities.js';
-import './avatar.css';
 
-const FALLBACK_BOUNDS = Object.freeze({ width: 2, height: 2.8, depth: 1.5 });
-const FOV = 32;
-
-class AvatarErrorBoundary extends Component {
-  state = { failed: false };
-  static getDerivedStateFromError() { return { failed: true }; }
-  componentDidCatch(error) {
-    console.warn('[Avatar] Unable to display the 3D view:', error?.message || error);
-    this.props.onError?.();
+// Catches errors thrown while loading/parsing the GLB (inside the Canvas tree)
+// so we can log the real reason and fall back to the procedural avatar.
+class GLBErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
   }
-  render() { return this.state.failed ? this.props.fallback : this.props.children; }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error, info) {
+    // eslint-disable-next-line no-console
+    console.error('[GLB_ERROR]', error?.message || error, info);
+    if (this.props.onError) this.props.onError(error);
+  }
+  render() {
+    if (this.state.hasError) return null;
+    return this.props.children;
+  }
 }
 
-function useMotionAvailability(ref) {
-  const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
-  const [reducedMotion, setReducedMotion] = useState(() =>
-    typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
-  useEffect(() => {
-    let intersects = true;
-    const update = () => setVisible(!document.hidden && intersects);
-    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-    const motionChange = () => setReducedMotion(!!media?.matches);
-    const observer = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver(([entry]) => {
-      intersects = entry.isIntersecting && entry.intersectionRatio > 0;
-      update();
-    }, { threshold: [0, 0.01] }) : null;
-    if (ref.current) observer?.observe(ref.current);
-    document.addEventListener('visibilitychange', update);
-    media?.addEventListener?.('change', motionChange);
-    update();
-    motionChange();
-    return () => {
-      observer?.disconnect();
-      document.removeEventListener('visibilitychange', update);
-      media?.removeEventListener?.('change', motionChange);
-    };
-  }, [ref]);
-  return { visible, reducedMotion };
-}
+const EMOTION_POSES = {
+  neutral: {},
+  happy: { mouthSmileLeft: 0.7, mouthSmileRight: 0.7, cheekSquintLeft: 0.4, cheekSquintRight: 0.4 },
+  sad: { mouthFrownLeft: 0.6, mouthFrownRight: 0.6, browInnerUp: 0.4 },
+  excited: { mouthSmileLeft: 0.9, mouthSmileRight: 0.9, eyeWideLeft: 0.5, eyeWideRight: 0.5 },
+  thinking: { browInnerUp: 0.3, mouthShrugLower: 0.3, eyeSquintLeft: 0.1 },
+  angry: { browDownLeft: 0.7, browDownRight: 0.7, mouthPressLeft: 0.4, mouthPressRight: 0.4 },
+};
 
-function FrameBudget({ active, fps }) {
-  const invalidate = useThree((state) => state.invalidate);
-  useEffect(() => {
-    invalidate(); // One frame on stop/resume, then no idle GPU work when stopped.
-    if (!active) return undefined;
-    const timer = window.setInterval(invalidate, 1000 / fps);
-    return () => window.clearInterval(timer);
-  }, [active, fps, invalidate]);
-  return null;
-}
+// Only these facial morph targets are driven/reset each frame. MPFB GLBs also
+// ship internal macro shape keys (body shape: muscle, cupsize, height, etc.,
+// named like "$md-...") which are exported with non-zero default weights. Those
+// MUST be left untouched, otherwise every character collapses to an identical
+// neutral body. So we explicitly reset only the face morphs we control.
+const CONTROLLED_MORPHS = [
+  'jawOpen',
+  'eyeBlinkLeft', 'eyeBlinkRight',
+  'eyeWideLeft', 'eyeWideRight',
+  'eyeSquintLeft', 'eyeSquintRight',
+  'browInnerUp', 'browDownLeft', 'browDownRight',
+  'mouthSmileLeft', 'mouthSmileRight',
+  'mouthFrownLeft', 'mouthFrownRight',
+  'mouthPressLeft', 'mouthPressRight',
+  'mouthShrugLower',
+  'cheekSquintLeft', 'cheekSquintRight',
+];
 
-function ContextMonitor({ onLost }) {
-  const gl = useThree((state) => state.gl);
-  useEffect(() => {
-    const canvas = gl.domElement;
-    const lost = (event) => {
-      event.preventDefault();
-      onLost();
-    };
-    canvas.addEventListener('webglcontextlost', lost);
-    return () => canvas.removeEventListener('webglcontextlost', lost);
-  }, [gl, onLost]);
-  return null;
-}
-
-// Memoization prevents a fresh environment cube render when emotion changes.
-const StudioLighting = memo(function StudioLighting({ resolution }) {
-  return (
-    <>
-      <hemisphereLight args={['#e7e6ff', '#3b3041', 0.65]} />
-      <directionalLight position={[3, 4, 5]} intensity={2.1} color="#fff0e3" />
-      <directionalLight position={[-3, 2.4, 3]} intensity={0.8} color="#d7dfff" />
-      <directionalLight position={[1, 3.5, -3]} intensity={1.5} color="#d9ccff" />
-      <Environment resolution={resolution} frames={1}>
-        <Lightformer form="rect" intensity={2} position={[1, 4, 4]} scale={[5, 3, 1]} color="#fff5ed" />
-        <Lightformer form="rect" intensity={1.1} position={[-4, 2, 2]} rotation-y={Math.PI / 4} scale={[2, 4, 1]} color="#e5ebff" />
-        <Lightformer form="rect" intensity={1.5} position={[3, 3, -3]} rotation-y={-Math.PI / 3} scale={[3, 4, 1]} color="#e1d5ff" />
-      </Environment>
-    </>
-  );
-});
-
-function ContactShadow({ resolution, width }) {
-  const shadow = useMemo(() => createAvatarShadow(resolution, Math.max(3.5, width * 1.8)), [resolution, width]);
-  const plane = useRef();
-  const baked = useRef(false);
-  useLayoutEffect(() => {
-    baked.current = false;
-    return () => shadow.dispose();
-  }, [shadow]);
-  useFrame(({ gl, scene }) => {
-    if (baked.current || !plane.current) return;
-    shadow.bake(gl, scene, plane.current);
-    baked.current = true;
-  });
-  return (
-    <mesh ref={plane} position={[0, -0.012, 0]} rotation-x={-Math.PI / 2} renderOrder={-1}>
-      <planeGeometry args={[shadow.width, shadow.width]} />
-      <meshBasicMaterial map={shadow.texture} transparent opacity={0.4} depthWrite={false} toneMapped={false} />
-    </mesh>
-  );
-}
-
-function CameraRig({ bounds, view, resetToken, reducedMotion, visible, interacting }) {
-  const controls = useRef();
-  const { camera, size, invalidate } = useThree();
-  const framing = useMemo(() => cameraFrame(bounds, size.width / Math.max(1, size.height), view, FOV),
-    [bounds, size.width, size.height, view]);
-  useLayoutEffect(() => {
-    const orbit = controls.current;
-    if (!orbit) return;
-    // Discard residual orbit/pan inertia before applying an explicit reset.
-    orbit.reset();
-    orbit.target.fromArray(framing.target);
-    camera.position.set(0, framing.target[1], framing.distance);
-    camera.near = framing.near;
-    camera.far = framing.far;
-    camera.lookAt(orbit.target);
-    camera.updateProjectionMatrix();
-    orbit.minDistance = framing.distance * 0.48;
-    orbit.maxDistance = framing.distance * 2.8;
-    orbit.update();
-    orbit.saveState();
-    invalidate();
-  }, [camera, framing, resetToken, invalidate]);
-  return (
-    <OrbitControls
-      ref={controls}
-      makeDefault
-      enabled={visible}
-      enableZoom
-      enablePan
-      autoRotate={false}
-      enableDamping={!reducedMotion}
-      dampingFactor={0.12}
-      minPolarAngle={Math.PI * 0.24}
-      maxPolarAngle={Math.PI * 0.7}
-      rotateSpeed={0.5}
-      zoomSpeed={0.7}
-      panSpeed={0.5}
-      onStart={() => { interacting.current = true; }}
-      onEnd={() => { interacting.current = false; }}
-      mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
-    />
-  );
-}
-
-function GLBAvatar({ url, emotion, amplitudeRef, isStreaming, active, gaze, interacting, onReady, shadowResolution }) {
+function GLBAvatar({ url, emotion, amplitudeRef, isStreaming, isPaused }) {
   const { scene } = useGLTF(url);
-  const avatar = useMemo(() => prepareAvatar(scene), [scene]);
-  const group = useRef();
+  const groupRef = useRef();
+  const morphRefs = useRef({});
   const time = useRef(0);
-  const nextBlink = useRef(1.8 + Math.random() * 2);
-  const gazeAngles = useRef({ yaw: 0, pitch: 0 });
-  useLayoutEffect(() => {
-    onReady(avatar.bounds);
-  }, [avatar, onReady]);
-  useEffect(() => () => releaseAvatar(avatar), [avatar]);
-  useLayoutEffect(() => {
-    if (active) return;
-    // Calm, open-eyed rest rather than freezing in the middle of a blink.
-    const targets = facialTargets(emotion, 0, 0, isStreaming);
-    avatar.faces.forEach(({ mesh, bindings }) => applyFacialTargets(mesh.morphTargetInfluences, bindings, targets, 0, true));
-    [avatar.head, avatar.neck, avatar.chest, ...avatar.eyes].forEach((joint) => poseJoint(joint, 0, 0));
-    group.current?.rotation.set(0, 0, 0);
-    gazeAngles.current = { yaw: 0, pitch: 0 };
-  }, [avatar, active, emotion, isStreaming]);
-  useFrame((_, delta) => {
-    if (!active || !group.current) return;
-    const dt = frameDelta(delta);
-    time.current += dt;
-    const t = time.current;
-    if (t > nextBlink.current + 0.24) nextBlink.current = t + 2.6 + Math.random() * 3;
-    const blink = blinkWeight(t - nextBlink.current);
-    const amplitude = clamp(amplitudeRef?.current || 0);
-    const targets = facialTargets(emotion, amplitude, blink, isStreaming);
-    for (const { mesh, bindings } of avatar.faces) applyFacialTargets(mesh.morphTargetInfluences, bindings, targets, dt);
+  const blinkTimer = useRef(0);
+  const blinkPhase = useRef(0);
+  const nextBlink = useRef(2 + Math.random() * 3);
+  const currentEmotion = useRef({});
 
-    // Feet stay planted: no whole-body scale pumping or continuous turntable.
-    group.current.rotation.z = Math.sin(t * 0.65) * 0.006;
-    group.current.rotation.y = Math.sin(t * 0.37) * 0.008;
-    const following = !interacting.current && gaze.current.inside;
-    const yaw = (following ? gaze.current.x * 0.13 : Math.sin(t * 0.43) * 0.025);
-    const pitch = (following ? -gaze.current.y * 0.06 : Math.sin(t * 0.57) * 0.012) + (isStreaming ? 0.025 : 0);
-    const angles = gazeAngles.current;
-    angles.yaw = damp(angles.yaw, yaw, 3.5, dt);
-    angles.pitch = damp(angles.pitch, pitch, 3.5, dt);
-    poseJoint(avatar.head, angles.yaw, angles.pitch + amplitude * Math.sin(t * 3.1) * 0.015);
-    poseJoint(avatar.neck, angles.yaw * 0.2, angles.pitch * 0.2);
-    poseJoint(avatar.chest, Math.sin(t * 0.42) * 0.006, Math.sin(t * 1.35) * 0.008);
-    for (const eye of avatar.eyes) poseJoint(eye, angles.yaw * 0.25, angles.pitch * 0.2);
+  useEffect(() => {
+    return () => {
+      useGLTF.clear(url);
+      morphRefs.current = {};
+    };
+  }, [url]);
+
+  const cloned = useMemo(() => {
+    const clone = scene.clone(true);
+    clone.traverse((child) => {
+      if (child.isMesh && child.material) {
+        // Properly clone materials, handling arrays (multi-primitive meshes)
+        if (Array.isArray(child.material)) {
+          child.material = child.material.map(m => m.clone());
+        } else {
+          child.material = child.material.clone();
+        }
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // NORMALIZE SIZE & POSITION. The MPFB GLB is exported at scale=0.1, so the
+    // mesh is only ~0.18 units tall with feet at the origin. With the camera at
+    // [0, 0.8, 5.5] that renders as a near-invisible speck. Wrap the model in a
+    // group, recenter it on the origin and scale it up to a consistent height so
+    // every character frames the same way regardless of their exported size.
+    // ---------------------------------------------------------------------
+    const box = new THREE.Box3().setFromObject(clone);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const targetHeight = 2.8;
+    const scaleFactor = targetHeight / maxDim;
+
+    // Recenter the model so its bounding-box center sits at the origin.
+    clone.position.sub(center);
+
+    const wrapper = new THREE.Group();
+    wrapper.add(clone);
+    wrapper.scale.setScalar(scaleFactor);
+    return wrapper;
+  }, [scene]);
+
+  useEffect(() => {
+    // =======================================================================
+    // NOTE FOR NEXT DEVELOPER / BLENDER MCP AGENT:
+    // - The GLB model was exported from MakeHuman/MPFB.
+    // - It contains two major meshes:
+    //   1. "Human" (Node name 'Human', Mesh name 'base'): The main body mesh
+    //      which contains vertex morph targets (hasMorphs = true, 14291 vertices).
+    //   2. "Human.high-poly" (Mesh name 'high-poly'): A helper mesh cage 
+    //      (1072 vertices) that has no morphs.
+    // - ISSUE: In the rendering, the skin mesh (head, face, and arms) of the base mesh
+    //      is invisible or distorted, resulting in a "headless body" render.
+    //      Hiding the 'high-poly' mesh leaves only the animated base mesh visible.
+    // =======================================================================
+    cloned.traverse((child) => {
+      if (!child.isMesh) return;
+
+      const name = (child.name || '').toLowerCase();
+      if (name.includes('high-poly') || name.includes('highpoly')) {
+        child.visible = false;
+        return;
+      }
+
+      if (child.morphTargetDictionary) {
+        morphRefs.current[child.uuid] = child;
+        // Body mesh is now mostly exposed skin (face/neck/arms/legs).
+        // Give it a small polygon offset to keep it behind clothes in any overlap.
+        const applyOffset = (mat) => {
+          mat.polygonOffset = true;
+          mat.polygonOffsetFactor = 2;
+          mat.polygonOffsetUnits = 2;
+        };
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach(applyOffset);
+          } else {
+            applyOffset(child.material);
+          }
+        }
+      }
+
+      // Fix material transparency: MPFB exports ALL materials as BLEND, which makes
+      // the body mesh (face/neck/arms/legs) invisible in Three.js. Only hair/eyebrows/
+      // eyelashes actually need transparency. Everything else must be OPAQUE.
+      if (child.material) {
+        const fixMat = (mat) => {
+          const n = (mat.name || '').toLowerCase();
+          const needsTransparency = n.includes('eyelash') || n.includes('eyebrow') ||
+            n.includes('hair') || n.includes('long01');
+          if (needsTransparency) {
+            mat.transparent = true;
+            mat.alphaTest = 0.5;
+            mat.side = THREE.DoubleSide;
+            mat.depthWrite = true;  // still write depth so hair sorts properly
+          } else {
+            // Force opaque for body, clothes, eyes, teeth, shoes
+            mat.transparent = false;
+            mat.alphaTest = 0;
+            mat.opacity = 1.0;
+            mat.depthWrite = true;
+            mat.side = THREE.FrontSide;
+            // Clear any blend mode artifacts
+            mat.blending = THREE.NormalBlending;
+          }
+
+          // -----------------------------------------------------------------
+          // VISUAL QUALITY: the MPFB GLB ships flat solid-colour materials with
+          // NO textures. To avoid the "grey clay mannequin" look we tune how
+          // each material responds to the image-based lighting (Environment),
+          // and add subtle realism (soft skin, glossy eyes, matte clothes).
+          // -----------------------------------------------------------------
+          if ('envMapIntensity' in mat) {
+            if (n.includes('skin') || n.includes('lips')) {
+              mat.envMapIntensity = 0.5;
+              mat.roughness = Math.min(mat.roughness ?? 0.6, 0.62);
+            } else if (n.includes('eye')) {
+              // Glossy, reflective eyes catch a highlight and read as "alive".
+              mat.envMapIntensity = 1.4;
+              mat.roughness = 0.12;
+            } else if (n.includes('hair')) {
+              mat.envMapIntensity = 0.7;
+              mat.roughness = 0.4;
+            } else {
+              // Clothes / shoes: gentle sheen.
+              mat.envMapIntensity = 0.85;
+            }
+          }
+          mat.needsUpdate = true;
+        };
+        if (Array.isArray(child.material)) {
+          child.material.forEach(fixMat);
+        } else {
+          fixMat(child.material);
+        }
+      }
+    });
+  }, [cloned]);
+
+  useEffect(() => {
+    currentEmotion.current = EMOTION_POSES[emotion] || EMOTION_POSES.neutral;
+  }, [emotion]);
+
+  useFrame((_, delta) => {
+    if (isPaused || !groupRef.current) return;
+    time.current += delta;
+
+    groupRef.current.scale.set(1, 1 + Math.sin(time.current * 1.5) * 0.015, 1);
+    groupRef.current.rotation.z = Math.sin(time.current * 0.4) * 0.02;
+    groupRef.current.rotation.y = Math.sin(time.current * 0.2) * 0.05;
+
+    // Blink
+    blinkTimer.current += delta;
+    let eyeBlink = 0;
+    if (blinkPhase.current === 0 && blinkTimer.current > nextBlink.current) {
+      blinkPhase.current = 1; blinkTimer.current = 0;
+    }
+    if (blinkPhase.current === 1) {
+      eyeBlink = Math.min(1, blinkTimer.current / 0.08);
+      if (eyeBlink >= 1) { blinkPhase.current = 2; blinkTimer.current = 0; }
+    } else if (blinkPhase.current === 2) {
+      eyeBlink = 1;
+      if (blinkTimer.current > 0.05) { blinkPhase.current = 3; blinkTimer.current = 0; }
+    } else if (blinkPhase.current === 3) {
+      eyeBlink = Math.max(0, 1 - blinkTimer.current / 0.1);
+      if (eyeBlink <= 0) { blinkPhase.current = 0; blinkTimer.current = 0; nextBlink.current = 2 + Math.random() * 4; }
+    }
+
+    const amp = amplitudeRef?.current || 0;
+    const targetMorphs = {
+      ...currentEmotion.current,
+      jawOpen: Math.max(amp * 0.8, currentEmotion.current.jawOpen || 0),
+      eyeBlinkLeft: eyeBlink,
+      eyeBlinkRight: eyeBlink,
+    };
+    if (isStreaming) {
+      targetMorphs.eyeSquintLeft = 0.15;
+      targetMorphs.eyeSquintRight = 0.15;
+      targetMorphs.browInnerUp = 0.2;
+    }
+
+    Object.values(morphRefs.current).forEach((mesh) => {
+      if (!mesh.morphTargetDictionary || !mesh.morphTargetInfluences) return;
+      const dict = mesh.morphTargetDictionary;
+      // Reset ONLY the face morphs we control; leave MPFB body-shape morphs alone.
+      for (const name of CONTROLLED_MORPHS) {
+        const idx = dict[name];
+        if (idx !== undefined) {
+          mesh.morphTargetInfluences[idx] = THREE.MathUtils.lerp(mesh.morphTargetInfluences[idx] || 0, 0, delta * 5);
+        }
+      }
+      for (const [name, value] of Object.entries(targetMorphs)) {
+        const idx = dict[name];
+        if (idx !== undefined) {
+          mesh.morphTargetInfluences[idx] = THREE.MathUtils.lerp(mesh.morphTargetInfluences[idx] || 0, value, delta * 8);
+        }
+      }
+    });
   });
+
   return (
-    <>
-      <group ref={group} dispose={null}>
-        <primitive object={avatar.root} dispose={null} />
-      </group>
-      {shadowResolution > 0 && <ContactShadow resolution={shadowResolution} width={avatar.bounds.width} />}
-    </>
+    <group ref={groupRef} dispose={null}>
+      <primitive object={cloned} />
+    </group>
   );
 }
 
-function ProceduralAvatar({ emotion, amplitudeRef, active, onReady }) {
-  const body = useRef();
-  const mouth = useRef();
-  const leftEye = useRef();
-  const rightEye = useRef();
-  const t = useRef(0);
-  const nextBlink = useRef(2.5);
-  const colors = { happy: '#9886da', excited: '#c19acb', sad: '#7391c9', angry: '#bd7a98', thinking: '#a083d4' };
-  const color = colors[emotion] || '#9384cc';
-  const target = useMemo(() => new THREE.Color(color), [color]);
-  useLayoutEffect(() => { onReady(FALLBACK_BOUNDS); }, [onReady]);
-  useLayoutEffect(() => {
-    if (active) return;
-    if (body.current) body.current.rotation.set(0, 0, 0);
-    if (mouth.current) mouth.current.scale.y = 0.35;
-    if (leftEye.current) leftEye.current.scale.y = 1;
-    if (rightEye.current) rightEye.current.scale.y = 1;
-  }, [active]);
+function ProceduralAvatar({ emotion, amplitudeRef, isStreaming, isPaused }) {
+  const groupRef = useRef();
+  const bodyRef = useRef();
+  const mouthRef = useRef();
+  const leftEyeRef = useRef();
+  const rightEyeRef = useRef();
+  const time = useRef(0);
+  const blinkTimer = useRef(0);
+  const blinkPhase = useRef(0);
+  const nextBlink = useRef(2 + Math.random() * 3);
+
+  const colors = {
+    neutral: { emissive: '#6366f1', glow: '#818cf8' },
+    happy: { emissive: '#10b981', glow: '#34d399' },
+    excited: { emissive: '#f59e0b', glow: '#fbbf24' },
+    sad: { emissive: '#3b82f6', glow: '#60a5fa' },
+    thinking: { emissive: '#8b5cf6', glow: '#a78bfa' },
+    angry: { emissive: '#ef4444', glow: '#f87171' },
+  }[emotion] || { emissive: '#6366f1', glow: '#818cf8' };
+
+  const targetEmissive = useMemo(() => new THREE.Color(colors.emissive), [colors.emissive]);
+  const currentEmissive = useMemo(() => new THREE.Color(colors.emissive), []);
+
   useFrame((_, delta) => {
-    if (!active) return;
-    const dt = frameDelta(delta);
-    t.current += dt;
-    if (t.current > nextBlink.current + 0.24) nextBlink.current = t.current + 2.8 + Math.random() * 3;
-    const eyeScale = 1 - blinkWeight(t.current - nextBlink.current) * 0.94;
-    leftEye.current.scale.y = rightEye.current.scale.y = eyeScale;
-    body.current.rotation.y = Math.sin(t.current * 0.4) * 0.04;
-    body.current.material.emissive.lerp(target, dampingFactor(4, dt));
-    mouth.current.scale.y = damp(mouth.current.scale.y, 0.35 + clamp(amplitudeRef?.current || 0) * 2, 20, dt);
+    if (isPaused) return;
+    time.current += delta;
+    if (!groupRef.current) return;
+
+    groupRef.current.position.y = Math.sin(time.current * 1.5) * 0.08;
+    groupRef.current.rotation.y = Math.sin(time.current * 0.3) * 0.15;
+
+    if (bodyRef.current) {
+      const breathe = 1 + Math.sin(time.current * 2) * 0.02;
+      bodyRef.current.scale.set(breathe, breathe * 1.01, breathe);
+      currentEmissive.lerp(targetEmissive, delta * 3);
+      bodyRef.current.material.emissive.copy(currentEmissive);
+      bodyRef.current.material.emissiveIntensity = 0.3 + Math.sin(time.current * 2) * 0.05;
+    }
+
+    blinkTimer.current += delta;
+    let eyeScaleY = 1;
+    if (blinkPhase.current === 0 && blinkTimer.current > nextBlink.current) {
+      blinkPhase.current = 1; blinkTimer.current = 0;
+    }
+    if (blinkPhase.current === 1) {
+      eyeScaleY = 1 - blinkTimer.current / 0.08;
+      if (eyeScaleY <= 0.1) { blinkPhase.current = 2; blinkTimer.current = 0; }
+    } else if (blinkPhase.current === 2) {
+      eyeScaleY = 0.1;
+      if (blinkTimer.current > 0.05) { blinkPhase.current = 3; blinkTimer.current = 0; }
+    } else if (blinkPhase.current === 3) {
+      eyeScaleY = 0.1 + blinkTimer.current / 0.1;
+      if (eyeScaleY >= 1) { eyeScaleY = 1; blinkPhase.current = 0; blinkTimer.current = 0; nextBlink.current = 2 + Math.random() * 4; }
+    }
+    if (isStreaming) eyeScaleY = 0.5 + Math.sin(time.current * 10) * 0.3;
+    if (leftEyeRef.current) leftEyeRef.current.scale.y = eyeScaleY;
+    if (rightEyeRef.current) rightEyeRef.current.scale.y = eyeScaleY;
+
+    const amp = amplitudeRef?.current || 0;
+    if (mouthRef.current) {
+      mouthRef.current.scale.y = THREE.MathUtils.lerp(mouthRef.current.scale.y, 0.3 + amp * 2.5, 0.3);
+      mouthRef.current.scale.x = 1 + amp * 0.5;
+    }
   });
+
   return (
-    <group position={[0, 1.75, 0]} scale={0.8}>
-      <mesh ref={body}>
-        <sphereGeometry args={[1, 32, 24]} />
-        <meshStandardMaterial color="#30283f" emissive={color} emissiveIntensity={0.16} metalness={0.25} roughness={0.36} />
+    <group ref={groupRef}>
+      <mesh ref={bodyRef}>
+        <icosahedronGeometry args={[1, 4]} />
+        <meshStandardMaterial color="#1a1a3e" emissive={colors.emissive} emissiveIntensity={0.3} metalness={0.8} roughness={0.2} />
       </mesh>
-      {[-0.33, 0.33].map((x, index) => (
-        <mesh key={x} ref={index === 0 ? leftEye : rightEye} position={[x, 0.21, 0.93]}>
-          <sphereGeometry args={[0.105, 16, 12]} />
-          <meshStandardMaterial color="#f1ecff" emissive="#aa9cde" emissiveIntensity={0.35} roughness={0.24} />
-        </mesh>
-      ))}
-      <mesh ref={mouth} position={[0, -0.22, 0.96]} scale={[1, 0.35, 1]}>
-        <sphereGeometry args={[0.13, 16, 12]} />
-        <meshStandardMaterial color="#14101f" roughness={0.8} />
+      <mesh ref={leftEyeRef} position={[-0.35, 0.2, 0.85]}>
+        <sphereGeometry args={[0.12, 16, 16]} />
+        <meshStandardMaterial color="#ffffff" emissive={colors.glow} emissiveIntensity={0.8} />
+      </mesh>
+      <mesh ref={rightEyeRef} position={[0.35, 0.2, 0.85]}>
+        <sphereGeometry args={[0.12, 16, 16]} />
+        <meshStandardMaterial color="#ffffff" emissive={colors.glow} emissiveIntensity={0.8} />
+      </mesh>
+      <mesh ref={mouthRef} position={[0, -0.25, 0.85]}>
+        <sphereGeometry args={[0.15, 16, 16]} />
+        <meshStandardMaterial color="#2a2a4e" emissive={colors.emissive} emissiveIntensity={0.3} />
       </mesh>
     </group>
   );
 }
 
-function StaticAvatar({ name, onRetry }) {
-  return (
-    <div className="avatar3d-unavailable" role="status">
-      <div className="avatar3d-monogram" aria-hidden="true">{(name || 'AI').slice(0, 2).toUpperCase()}</div>
-      <strong>3D view unavailable</strong>
-      <span>Your conversation is still available.</span>
-      <button type="button" onClick={onRetry}>Retry 3D view</button>
-    </div>
-  );
-}
-
-function AvatarStage({ avatarUrl, characterName, emotion, amplitudeRef, isStreaming, isPaused, visible, reducedMotion }) {
-  const assetType = avatarAssetType(avatarUrl);
-  const [modelFailed, setModelFailed] = useState(false);
-  const [graphicsFailed, setGraphicsFailed] = useState(() => assetType !== 'image' && !avatarWebGLAvailable());
-  const [ready, setReady] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-  const [view, setView] = useState('portrait');
-  const [quality, setQuality] = useState('balanced');
-  const [resetToken, setResetToken] = useState(0);
-  const [bounds, setBounds] = useState(FALLBACK_BOUNDS);
-  const gaze = useRef({ x: 0, y: 0, inside: false });
-  const interacting = useRef(false);
-  const preset = QUALITY_PRESETS[quality];
-  const isModel = assetType === 'model' && !modelFailed;
-  const isImage = assetType === 'image' && !modelFailed;
-  const active = shouldAnimate({ paused: isPaused, reducedMotion, visible }) && !graphicsFailed;
-  const handleReady = useCallback((nextBounds) => {
-    setBounds(nextBounds);
-    setReady(true);
-  }, []);
-  const handleModelFailure = useCallback(() => {
-    setModelFailed(true);
-    setReady(false);
-    if (!avatarWebGLAvailable()) setGraphicsFailed(true);
-  }, []);
-  const handleGraphicsFailure = useCallback(() => setGraphicsFailed(true), []);
-  const retry = useCallback(() => {
-    // Clear only a failed load on explicit retry; normal mounts reuse the URL
-    // and parsed GLTF cache, including existing query/hash/version parameters.
-    if (assetType === 'model' && modelFailed) useGLTF.clear(avatarUrl);
-    setModelFailed(false);
-    setGraphicsFailed(assetType !== 'image' && !avatarWebGLAvailable(true));
-    setReady(false);
-    setAttempt((value) => value + 1);
-  }, [assetType, avatarUrl, modelFailed]);
-  useEffect(() => {
-    amplitudeRef?.setVisualActive?.(active && !isImage && ready);
-    return () => amplitudeRef?.setVisualActive?.(false);
-  }, [amplitudeRef, active, isImage, ready]);
-  const motionStatus = isPaused ? 'Motion paused' : reducedMotion ? 'Reduced motion' : !visible ? 'Motion resting' : 'Live motion';
-  const status = modelFailed ? 'Simple avatar · model unavailable' : !ready ? (isImage ? 'Loading portrait…' : 'Loading 3D avatar…') :
-    isImage ? 'Portrait' : assetType === 'fallback' ? `Simple avatar · ${motionStatus.toLowerCase()}` : motionStatus;
-  const fallback = <StaticAvatar name={characterName} onRetry={retry} />;
-  return (
-    <div
-      className="avatar3d-stage"
-      data-motion={active ? 'active' : 'still'}
-      onContextMenu={(event) => event.preventDefault()}
-      onPointerMove={(event) => {
-        if (!active || event.pointerType === 'touch') return;
-        const rect = event.currentTarget.getBoundingClientRect();
-        gaze.current = {
-          x: clamp((event.clientX - rect.left) / rect.width * 2 - 1, -1, 1),
-          y: clamp(1 - (event.clientY - rect.top) / rect.height * 2, -1, 1),
-          inside: true,
-        };
-      }}
-      onPointerLeave={() => { gaze.current.inside = false; }}
-    >
-      {graphicsFailed ? fallback : isImage ? (
-        <div className={`avatar-portrait ${active && isStreaming ? 'avatar-portrait-streaming' : ''}`}>
-          <div className="avatar-portrait-ring" />
-          <img src={avatarUrl} alt={`${characterName || 'Companion'} portrait`} className="avatar-portrait-img"
-            onLoad={() => setReady(true)} onError={handleModelFailure} />
-        </div>
-      ) : (
-        <AvatarErrorBoundary key={attempt} onError={handleGraphicsFailure} fallback={fallback}>
-          <Canvas
-            frameloop="demand"
-            camera={{ position: [0, 2.24, 4.5], fov: FOV, near: 0.01, far: 50 }}
-            dpr={[1, preset.dpr]}
-            gl={{ antialias: true, alpha: true, powerPreference: 'default', toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1 }}
-            fallback={fallback}
-            aria-label={`Interactive 3D view of ${characterName || 'your companion'}`}
-          >
-            <ContextMonitor onLost={handleGraphicsFailure} />
-            <FrameBudget active={active && ready} fps={preset.fps} />
-            <StudioLighting resolution={preset.environment} />
-            <Suspense fallback={null}>
-              {isModel ? (
-                <AvatarErrorBoundary key={`${avatarUrl}:${attempt}`} onError={handleModelFailure} fallback={null}>
-                  <GLBAvatar url={avatarUrl} emotion={emotion} amplitudeRef={amplitudeRef} isStreaming={isStreaming}
-                    active={active} gaze={gaze} interacting={interacting} onReady={handleReady} shadowResolution={preset.shadow} />
-                </AvatarErrorBoundary>
-              ) : (
-                <ProceduralAvatar emotion={emotion} amplitudeRef={amplitudeRef} active={active} onReady={handleReady} />
-              )}
-            </Suspense>
-            <CameraRig bounds={bounds} view={isModel ? view : 'portrait'} resetToken={resetToken}
-              reducedMotion={reducedMotion || isPaused} visible={visible} interacting={interacting} />
-          </Canvas>
-        </AvatarErrorBoundary>
-      )}
-      {!isImage && !graphicsFailed && (
-        <div className="avatar3d-toolbar" aria-label="3D view controls" onPointerMove={(event) => event.stopPropagation()}>
-          {isModel && <div className="avatar3d-view-toggle" role="group" aria-label="Camera framing">
-            <button type="button" aria-pressed={view === 'portrait'} onClick={() => setView('portrait')}>Portrait</button>
-            <button type="button" aria-pressed={view === 'body'} onClick={() => setView('body')}>Body</button>
-          </div>}
-          <button type="button" onClick={() => setResetToken((value) => value + 1)} title="Reset camera position and zoom">Reset</button>
-          <select aria-label="Avatar rendering quality" title="Eco: 24 fps / Balanced: 30 fps / High: 60 fps"
-            value={quality} onChange={(event) => setQuality(event.target.value)}>
-            {Object.entries(QUALITY_PRESETS).map(([key, option]) => <option key={key} value={key}>{option.label}</option>)}
-          </select>
-        </div>
-      )}
-      {!graphicsFailed && (
-        <div className={`avatar3d-status ${!ready ? 'avatar3d-status-loading' : ''}`} role="status" aria-live="polite"
-          title="Mouth motion uses audio volume; browser speech uses a simulated cadence. Not phoneme lip-sync.">
-          <span className="avatar3d-status-dot" aria-hidden="true" />
-          <span>{status}</span>
-          {modelFailed && <button type="button" onClick={retry}>Retry</button>}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function HumanAvatar3D({
-  avatarUrl = null, emotion = 'neutral', amplitudeRef, isStreaming = false, isPaused = false, characterName,
+  avatarUrl = null, emotion = 'neutral', amplitudeRef,
+  isStreaming = false, isPaused = false, characterName,
+  clothingStyle = 'casual', clothingDescription = '', bodyType = 'athletic',
 }) {
-  const wrapper = useRef();
-  const availability = useMotionAvailability(wrapper);
+  const [hasError, setHasError] = useState(false);
+  const [useFallback, setUseFallback] = useState(false);
+
+  useEffect(() => {
+    setHasError(false);
+    setUseFallback(false);
+  }, [avatarUrl]);
+
+  const handleError = useCallback((e) => {
+    const msg = e?.message || e?.error?.message || (typeof e === 'string' ? e : '') || '(no error object)';
+    // eslint-disable-next-line no-console
+    console.error('[AVATAR_FALLBACK] reason:', msg, e);
+    setUseFallback(true);
+  }, []);
+
+  const effectiveUrl = (hasError || useFallback) ? null : avatarUrl;
+  if (effectiveUrl && !window.__GLOBAL_CACHE_BUSTS) {
+    window.__GLOBAL_CACHE_BUSTS = {};
+  }
+  if (effectiveUrl && !window.__GLOBAL_CACHE_BUSTS[effectiveUrl]) {
+    window.__GLOBAL_CACHE_BUSTS[effectiveUrl] = Date.now();
+  }
+  const cacheBust = effectiveUrl ? window.__GLOBAL_CACHE_BUSTS[effectiveUrl] : null;
+
+  const cacheBustedUrl = effectiveUrl ? `${effectiveUrl}?v=${cacheBust}` : null;
+
+  const isGlbUrl = !!(effectiveUrl && (effectiveUrl.endsWith('.glb') || effectiveUrl.includes('.glb')));
+  // NOTE: GLB must take priority. 3D avatar URLs live under "/avatars/*.glb", so the
+  // generic "/avatars/" substring check below would otherwise (incorrectly) treat the
+  // GLB as a 2D portrait image and render a broken <img>. Exclude GLBs explicitly.
+  const isImageUrl = !isGlbUrl && !!(effectiveUrl && (effectiveUrl.endsWith('.png') || effectiveUrl.endsWith('.jpg') || effectiveUrl.endsWith('.jpeg') || effectiveUrl.includes('/avatars/')));
+
+
+
+  // If character has a 2D image avatar, show portrait mode
+  if (isImageUrl) {
+    const emotionColors = {
+      neutral: 'var(--accent-primary)',
+      happy: 'var(--success)',
+      excited: '#f59e0b',
+      sad: '#6366f1',
+      angry: 'var(--danger)',
+      thinking: 'var(--accent-secondary)',
+    };
+    const glowColor = emotionColors[emotion] || emotionColors.neutral;
+
+    return (
+      <div className="avatar-canvas-wrapper">
+        <div
+          className={`avatar-portrait ${isStreaming ? 'avatar-portrait-streaming' : ''}`}
+          style={{ '--avatar-glow-color': glowColor }}
+        >
+          <div className="avatar-portrait-ring" />
+          <img
+            src={effectiveUrl}
+            alt="Character avatar"
+            className="avatar-portrait-img"
+            onError={handleError}
+          />
+          {isStreaming && (
+            <div className="avatar-portrait-thinking">
+              <span /><span /><span />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="avatar-canvas-wrapper avatar3d-wrapper" ref={wrapper}>
-      <AvatarStage key={avatarUrl || 'procedural'} avatarUrl={avatarUrl} emotion={emotion}
-        amplitudeRef={amplitudeRef} isStreaming={isStreaming} isPaused={isPaused} characterName={characterName}
-        {...availability} />
+    <div className="avatar-canvas-wrapper" onContextMenu={(e) => e.preventDefault()}>
+      <Canvas
+        camera={{ position: [0, 0.8, 5.5], fov: 35 }}
+        gl={{
+          antialias: true,
+          alpha: true,
+          powerPreference: 'high-performance',
+          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMappingExposure: 1.15,
+          outputColorSpace: THREE.SRGBColorSpace,
+        }}
+        dpr={[1, 2]}
+        onError={handleError}
+        style={{ width: '100%', height: '100%' }}
+      >
+        {/* Soft three-point lighting: warm key, cool fill, bright rim for separation */}
+        <ambientLight intensity={0.3} />
+        <directionalLight position={[3, 5, 4]} intensity={1.5} color="#fff4e6" />
+        <directionalLight position={[-4, 2, 2]} intensity={0.5} color="#bcd2ff" />
+        <directionalLight position={[0, 3, -5]} intensity={0.9} color="#ffffff" />
+
+        {/* In-memory studio HDRI — realistic image-based lighting with NO external
+            CDN fetch (critical for a self-hosted/offline deployment). This is what
+            turns the flat solid-colour materials into believable surfaces. */}
+        <Environment resolution={256} frames={1}>
+          <Lightformer form="rect" intensity={2.2} position={[0, 3, 3]} scale={[9, 4, 1]} color="#ffffff" />
+          <Lightformer form="rect" intensity={1.0} position={[-5, 1, 2]} scale={[4, 5, 1]} color="#cfe0ff" />
+          <Lightformer form="rect" intensity={1.0} position={[5, 1, -3]} scale={[4, 5, 1]} color="#ffe8cc" />
+          <Lightformer form="ring" intensity={0.5} position={[0, -2, 4]} scale={3} color="#ffffff" />
+        </Environment>
+
+        <Suspense fallback={null}>
+          {isGlbUrl ? (
+            <GLBErrorBoundary onError={handleError}>
+              <GLBAvatar
+                key={cacheBustedUrl}
+                url={cacheBustedUrl}
+                emotion={emotion}
+                amplitudeRef={amplitudeRef}
+                isStreaming={isStreaming}
+                isPaused={isPaused}
+              />
+            </GLBErrorBoundary>
+          ) : (
+            <ProceduralAvatar
+              emotion={emotion}
+              amplitudeRef={amplitudeRef}
+              isStreaming={isStreaming}
+              isPaused={isPaused}
+            />
+          )}
+        </Suspense>
+
+        {/* Grounding contact shadow so the figure doesn't appear to float */}
+        {isGlbUrl && (
+          <ContactShadows
+            position={[0, -1.45, 0]}
+            opacity={0.35}
+            scale={7}
+            blur={2.8}
+            far={4}
+            resolution={512}
+            color="#000000"
+          />
+        )}
+
+        <OrbitControls
+          enableZoom={true}
+          enablePan={true}
+          target={[0, 0.8, 0]}
+          autoRotate={!isPaused}
+          autoRotateSpeed={0.3}
+          minPolarAngle={Math.PI / 6}
+          maxPolarAngle={Math.PI / 1.4}
+          minDistance={1.5}
+          maxDistance={10}
+          enableDamping={true}
+          dampingFactor={0.05}
+          mouseButtons={{
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.DOLLY,
+            RIGHT: THREE.MOUSE.PAN,
+          }}
+        />
+      </Canvas>
     </div>
   );
 }
+

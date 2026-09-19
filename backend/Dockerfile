@@ -35,8 +35,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ---- Playwright engines (Chromium default; Firefox is opt-in) --------------
-RUN python -m playwright install --with-deps chromium firefox
+# ---- Playwright + Chromium (Phase 3: Browser Automation) -------------------
+RUN playwright install chromium --with-deps
 
 # ---- Application source ----------------------------------------------------
 COPY . .
@@ -46,5 +46,4 @@ RUN mkdir -p /app/sandbox && chmod 700 /app/sandbox
 
 EXPOSE 8000
 
-# Development default; production Compose replaces this without --reload.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+ENTRYPOINT ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

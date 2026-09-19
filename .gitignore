@@ -39,9 +39,6 @@ htmlcov/
 # ──────────────────────────────────────────────
 node_modules/
 dist/
-dist-studio/
-test-results/
-playwright-report/
 build/
 .vite/
 .next/

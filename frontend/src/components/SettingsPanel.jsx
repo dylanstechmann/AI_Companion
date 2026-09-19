@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, Save, Server, Cpu, Volume2, Loader, Sparkles } from 'lucide-react';
-import BrowserPrivacyPanel from './BrowserPrivacyPanel.jsx';
-import { getPreference, setPreference } from '../lib/preferences.js';
 
 const CLOUD_VOICES = [
   { value: 'alloy', label: 'Alloy' },
@@ -20,13 +18,12 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
   const [isSaving, setIsSaving] = useState(false);
   const [healthData, setHealthData] = useState(health);
 
-  // Page-session preferences also work when browser storage is unavailable.
+  // TTS settings (stored in localStorage)
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [ttsMode, setTtsMode] = useState('browser');
   const [ttsVoice, setTtsVoice] = useState('alloy');
   const [ttsRate, setTtsRate] = useState(1.0);
   const [browserVoices, setBrowserVoices] = useState([]);
-  const [localOnly, setLocalOnly] = useState(() => getPreference('tts_local_only') !== 'false');
 
   // Load config and health
   useEffect(() => {
@@ -44,14 +41,14 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
       .catch(err => console.error("Failed to load health", err));
   }, []);
 
-  // Load TTS settings and subscribe without replacing other voice listeners.
+  // Load TTS settings from localStorage
   useEffect(() => {
     try {
-      setTtsEnabled(getPreference('tts_enabled') !== 'false');
-      setTtsMode(getPreference('tts_mode') || 'browser');
-      setTtsVoice(getPreference('tts_voice') || 'alloy');
-      setTtsRate(parseFloat(getPreference('tts_rate')) || 1.0);
-    } catch { /* retain defaults */ }
+      setTtsEnabled(localStorage.getItem('tts_enabled') !== 'false');
+      setTtsMode(localStorage.getItem('tts_mode') || 'browser');
+      setTtsVoice(localStorage.getItem('tts_voice') || 'alloy');
+      setTtsRate(parseFloat(localStorage.getItem('tts_rate')) || 1.0);
+    } catch { /* localStorage unavailable */ }
 
     // Load browser voices
     if ('speechSynthesis' in window) {
@@ -59,8 +56,7 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
         setBrowserVoices(window.speechSynthesis.getVoices());
       };
       loadVoices();
-      window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
-      return () => window.speechSynthesis.removeEventListener('voiceschanged', loadVoices);
+      window.speechSynthesis.onvoiceschanged = loadVoices;
     }
   }, []);
 
@@ -85,10 +81,10 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
     }
   };
 
-  // Save non-sensitive session preferences.
+  // Save TTS setting to localStorage
   const handleTTSSave = useCallback((key, value) => {
     try {
-      setPreference(key, value);
+      localStorage.setItem(key, String(value));
     } catch { /* ignore */ }
   }, []);
 
@@ -156,8 +152,6 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
       </div>
 
       <div className="settings-body scrollbar-custom">
-        <BrowserPrivacyPanel />
-        <hr className="settings-divider" />
         {/* ── TTS Settings ──────────────────────────────────────── */}
         <section className="settings-section">
           <h3 className="settings-section-title">
@@ -198,21 +192,9 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
               </div>
 
               {/* Voice Selector */}
-              {ttsMode === 'browser' && (
-                <div className="settings-field">
-                  <label className="settings-hint">
-                    <input type="checkbox" checked={localOnly} onChange={(event) => {
-                      setLocalOnly(event.target.checked);
-                      handleTTSSave('tts_local_only', event.target.checked);
-                    }} /> Only use voices the browser reports as local
-                  </label>
-                  <p className="settings-hint">If no local voice is available, speech stays off. Unchecking allows system or browser voices that may use a remote service.</p>
-                </div>
-              )}
               <div className="settings-field">
-                <label className="settings-field-label" htmlFor="tts-voice">Voice</label>
+                <label className="settings-field-label">Voice</label>
                 <select
-                  id="tts-voice"
                   className="settings-select"
                   value={ttsVoice}
                   onChange={(e) => handleTtsVoiceChange(e.target.value)}
@@ -221,18 +203,18 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
                     ? CLOUD_VOICES.map((v) => (
                         <option key={v.value} value={v.value}>{v.label}</option>
                       ))
-                    : [<option key="auto" value="alloy">Automatic available voice</option>, ...browserVoices.filter(v => !localOnly || v.localService).map((v) => (
+                    : browserVoices.map((v) => (
                         <option key={v.voiceURI} value={v.voiceURI}>
-                          {v.name} ({v.lang}) {v.localService ? '(local)' : '(remote)'}
+                          {v.name} ({v.lang})
                         </option>
-                      ))]
+                      ))
                   }
                 </select>
                 {ttsMode === 'browser' && browserVoices.length === 0 && (
                   <p className="settings-hint">No voices detected. Your browser may not support TTS.</p>
                 )}
                 {ttsMode === 'cloud' && (
-                  <p className="settings-hint">Cloud TTS sends response text to the configured speech provider and requires a backend API key.</p>
+                  <p className="settings-hint">Cloud TTS requires a TTS API key configured on the backend.</p>
                 )}
               </div>
 
