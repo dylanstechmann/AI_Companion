@@ -1,0 +1,8 @@
+# Lightweight auth/route regression dependencies; no model or GPU packages.
+fastapi
+httpx
+pydantic-settings
+python-multipart
+aiosqlite
+python-jose[cryptography]
+bcrypt

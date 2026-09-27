@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, Save, Server, Cpu, Volume2, Loader, Sparkles } from 'lucide-react';
 
@@ -27,7 +28,7 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
 
   // Load config and health
   useEffect(() => {
-    fetch('/api/config')
+    apiFetch('/api/config')
       .then(res => res.json())
       .then(data => {
         setSttMode(data.stt_mode || data.STT_MODE);
@@ -35,7 +36,7 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
       })
       .catch(err => console.error("Failed to load config", err));
 
-    fetch('/api/health')
+    apiFetch('/api/health')
       .then(res => res.json())
       .then(data => setHealthData(data))
       .catch(err => console.error("Failed to load health", err));
@@ -69,7 +70,7 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
 
   const handleConfigSave = async (key, value) => {
     try {
-      await fetch('/api/config', {
+      await apiFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ [key]: value })
@@ -115,7 +116,7 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
     if (!charData) return;
     setIsSaving(true);
     try {
-      const res = await fetch(`/api/characters/${charData.id}`, {
+      const res = await apiFetch(`/api/characters/${charData.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -351,7 +352,7 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
                       }
                       setIsGeneratingAvatar(true);
                       try {
-                        const response = await fetch(`/api/characters/${charData.id}/generate-avatar`, {
+                        const response = await apiFetch(`/api/characters/${charData.id}/generate-avatar`, {
                           method: 'POST',
                         });
                         if (response.ok) {

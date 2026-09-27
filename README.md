@@ -212,3 +212,10 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 <p align="center">
   Built with ❤️ and a healthy distrust of cloud-only AI
 </p>
+## Authentication setup
+
+Before exposing this instance, follow [Authentication and trusted accounts](docs/AUTHENTICATION.md).
+The development ports bind to localhost. Registration and demo login are disabled
+by default; create the first trusted account locally, then disable registration.
+All operational API requests require a Bearer token. The frontend handles token
+attachment, refresh, and sign-out.

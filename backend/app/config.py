@@ -11,6 +11,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,6 +60,9 @@ class Settings(BaseSettings):
     TTS_VOICE: str = "alloy"
 
     # ---- Auth / JWT ----------------------------------------------------------
+    APP_ENV: Literal["development", "production"] = "development"
+    ALLOW_REGISTRATION: bool = False
+    ALLOW_DEMO_LOGIN: bool = False
     JWT_SECRET: str = ""
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
@@ -105,6 +109,20 @@ class Settings(BaseSettings):
     VAPID_PUBLIC_KEY: str = ""
     VAPID_PRIVATE_KEY: str = ""
     VAPID_SUBJECT: str = "mailto:admin@example.com"
+
+    @model_validator(mode="after")
+    def validate_auth_configuration(self) -> "Settings":
+        if self.JWT_SECRET and (
+            len(self.JWT_SECRET.strip()) < 32
+            or self.JWT_SECRET.startswith("change-me")
+        ):
+            raise ValueError("JWT_SECRET must be a generated secret of at least 32 characters.")
+        if self.APP_ENV == "production":
+            if not self.JWT_SECRET:
+                raise ValueError("JWT_SECRET is required in production.")
+            if self.ALLOW_DEMO_LOGIN or self.ALLOW_REGISTRATION:
+                raise ValueError("Demo access and registration must be disabled in production.")
+        return self
 
 
 @lru_cache(maxsize=1)

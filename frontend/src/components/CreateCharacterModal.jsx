@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import React, { useState, useEffect } from 'react';
 import { X, Sparkles, Loader, Cpu, Save } from 'lucide-react';
 
@@ -17,7 +18,7 @@ export default function CreateCharacterModal({ onClose, onCreate }) {
   useEffect(() => {
     const fetchBalance = async () => {
       try {
-        const res = await fetch('/api/payments/balance');
+        const res = await apiFetch('/api/payments/balance');
         if (res.ok) {
           const data = await res.json();
           setUserBalance(data.credits || 0);

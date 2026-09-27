@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 ﻿import { useEffect, useRef, useState, useCallback } from 'react';
 import { Send, MessageSquare, Eye, EyeOff, Pause, Play } from 'lucide-react';
 import VoiceRecorder from './VoiceRecorder.jsx';
@@ -65,7 +66,7 @@ export default function ChatArea({ character, characterId }) {
 
     const fetchMessages = async () => {
       try {
-        const res = await fetch(`/api/characters/${characterId}/messages`);
+        const res = await apiFetch(`/api/characters/${characterId}/messages`);
         if (res.ok) {
           const data = await res.json();
           const list = Array.isArray(data) ? data : data.messages || [];
@@ -104,7 +105,7 @@ export default function ChatArea({ character, characterId }) {
 
     if (tts.mode === 'cloud') {
       try {
-        const res = await fetch('/api/tts', {
+        const res = await apiFetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text, voice: tts.voice, speed: tts.rate }),
@@ -147,7 +148,7 @@ export default function ChatArea({ character, characterId }) {
         formData.append('character_id', characterId);
         formData.append('file', pendingImage);
 
-        const res = await fetch('/api/chat/image', {
+        const res = await apiFetch('/api/chat/image', {
           method: 'POST',
           body: formData,
         });

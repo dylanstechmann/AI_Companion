@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Optional
 
 from fastapi import HTTPException, Request, status
@@ -64,22 +65,16 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in user.items() if k != "password_hash"}
 
 
-def _default_secret() -> str:
-    """Return the configured JWT secret, falling back to an ephemeral one.
+@lru_cache(maxsize=1)
+def _development_secret() -> str:
+    """Use one ephemeral key per process, without writing it to disk."""
+    logger.warning("JWT_SECRET is unset; development tokens expire on process restart.")
+    return secrets.token_urlsafe(32)
 
-    A non-empty ephemeral secret lets the app boot without configuration (e.g.
-    during local development or tests) but is logged so operators know tokens
-    will not survive a restart.
-    """
-    secret = get_settings().JWT_SECRET
-    if secret:
-        return secret
-    ephemeral = secrets.token_urlsafe(32)
-    logger.warning(
-        "JWT_SECRET is not set – generated ephemeral secret. "
-        "Tokens will be invalidated on restart."
-    )
-    return ephemeral
+
+def _default_secret() -> str:
+    settings = get_settings()
+    return settings.JWT_SECRET or _development_secret()
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +123,7 @@ class AuthService:
                 token,
                 _default_secret(),
                 algorithms=[settings.JWT_ALGORITHM],
+                options={"require_exp": True, "require_sub": True},
             )
         except JWTError as exc:
             raise HTTPException(
@@ -142,6 +138,13 @@ class AuthService:
                 detail="Invalid token type",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        subject = payload.get("sub")
+        if not isinstance(subject, str) or len(subject) > 19 or not subject.isascii() or not subject.isdecimal() or not 1 <= int(subject) <= 9223372036854775807:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token subject",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return payload
 
     # -- user flows ----------------------------------------------------------
@@ -152,7 +155,9 @@ class AuthService:
         password: str,
         display_name: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Create a new user and return the public user dict."""
+        """Create a trusted account only during explicitly enabled setup."""
+        if not get_settings().ALLOW_REGISTRATION:
+            raise HTTPException(status_code=403, detail="Registration is disabled on this instance.")
         existing = await db.get_user_by_email(email)
         if existing is not None:
             raise HTTPException(
@@ -167,7 +172,7 @@ class AuthService:
             display_name=display_name,
         )
         logger.info("Registered new user: email=%s id=%s", email, user.get("id"))
-        return _public_user(user)
+        return self._token_response(user)
 
     async def login(self, email: str, password: str) -> dict[str, Any]:
         """Verify credentials and return a token pair plus public user."""
@@ -186,6 +191,16 @@ class AuthService:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        return self._token_response(user)
+
+    @staticmethod
+    def _check_enabled(user: dict[str, Any]) -> None:
+        if user.get("email") == "demo@companion.local" and not get_settings().ALLOW_DEMO_LOGIN:
+            raise HTTPException(status_code=401, detail="Demo access is disabled.",
+                                headers={"WWW-Authenticate": "Bearer"})
+
+    def _token_response(self, user: dict[str, Any]) -> dict[str, Any]:
+        self._check_enabled(user)
         user_id = int(user["id"])
         return {
             "access_token": self.create_access_token(user_id),
@@ -205,12 +220,7 @@ class AuthService:
                 detail="User no longer exists",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        return {
-            "access_token": self.create_access_token(user_id),
-            "refresh_token": self.create_refresh_token(user_id),
-            "token_type": "bearer",
-            "user": _public_user(user),
-        }
+        return self._token_response(user)
 
     async def get_current_user(self, token: str) -> dict[str, Any]:
         """Decode an access token and return the matching public user dict."""
@@ -223,6 +233,7 @@ class AuthService:
                 detail="User no longer exists",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        self._check_enabled(user)
         return _public_user(user)
 
     async def create_or_get_demo_user(self) -> dict[str, Any]:
@@ -231,6 +242,8 @@ class AuthService:
         Backward-compatibility helper: if the ``users`` table is empty, create
         a single 'demo' user so the app works without explicit registration.
         """
+        if not get_settings().ALLOW_DEMO_LOGIN:
+            raise HTTPException(status_code=403, detail="Demo access is disabled on this instance.")
         demo_email = "demo@companion.local"
         existing = await db.get_user_by_email(demo_email)
         if existing is not None:
@@ -276,6 +289,9 @@ async def require_auth(request: Request) -> dict[str, Any]:
 
     Returns the public user dict on success; raises 401 otherwise.
     """
+    cached_user = getattr(request.state, "authenticated_user", None)
+    if cached_user is not None:
+        return cached_user
     token = _extract_bearer(request)
     if token is None:
         raise HTTPException(
@@ -283,7 +299,32 @@ async def require_auth(request: Request) -> dict[str, Any]:
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return await auth_service.get_current_user(token)
+    user = await auth_service.get_current_user(token)
+    request.state.authenticated_user = user
+    return user
+
+
+# Every operational route is authenticated by default. Webhook endpoints
+# perform their provider-specific signature verification in their handlers.
+PUBLIC_ENDPOINTS = frozenset({
+    ("GET", "/api/health"),
+    ("GET", "/api/auth/options"),
+    ("POST", "/api/auth/login"),
+    ("POST", "/api/auth/register"),
+    ("POST", "/api/auth/refresh"),
+    ("POST", "/api/auth/demo"),
+    ("GET", "/api/payments/credit-packs"),
+    ("GET", "/api/notifications/vapid-public-key"),
+    ("POST", "/api/payments/stripe/webhook"),
+    ("POST", "/api/payments/btcpay/webhook"),
+    ("POST", "/api/payments/webhook"),
+})
+
+
+async def require_api_user(request: Request) -> dict[str, Any] | None:
+    if (request.method, request.url.path) in PUBLIC_ENDPOINTS:
+        return None
+    return await require_auth(request)
 
 
 async def get_optional_user(request: Request) -> Optional[dict[str, Any]]:

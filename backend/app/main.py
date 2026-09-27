@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from app.avatar_generator import get_avatar_generator
 
+from app.auth import require_api_user, require_auth
 from app.config import get_settings
 from app.database import (
     add_message,
@@ -131,6 +132,7 @@ app = FastAPI(
     version="0.1.0",
     description="Backend for the AI Companion application.",
     lifespan=lifespan,
+    dependencies=[Depends(require_api_user)],
 )
 
 app.add_middleware(
@@ -214,11 +216,7 @@ async def speech_to_text(request: Request, file: UploadFile = File(...)):
     if stt_service is None:
         raise HTTPException(503, "STT service not initialised.")
 
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     from app.payments import get_payment_service
     ps = get_payment_service()
@@ -248,11 +246,7 @@ async def text_to_speech(http_request: Request, request: TTSRequest):
     """
     import openai
 
-    from app.auth import get_optional_user
-    user = await get_optional_user(http_request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(http_request)
 
     from app.payments import get_payment_service
     ps = get_payment_service()
@@ -351,11 +345,7 @@ async def remove_character(character_id: int):
 @app.post("/api/characters/{character_id}/generate-avatar", tags=["Characters"])
 async def generate_character_avatar(character_id: int, request: Request):
     """Generate a realistic AI avatar for a character based on their appearance description."""
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     from app.payments import get_payment_service
     ps = get_payment_service()
@@ -404,11 +394,7 @@ async def generate_character_3d_avatar(
     character's ``avatar_3d_url`` field and credits are deducted using the
     ``avatar_generation`` operation cost.
     """
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     from app.payments import get_payment_service, OPERATION_COSTS
     ps = get_payment_service()
@@ -480,11 +466,7 @@ async def chat(body: ChatRequest, request: Request):
     if char is None:
         raise HTTPException(404, "Character not found.")
 
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     from app.payments import get_payment_service, OPERATION_COSTS
     ps = get_payment_service()
@@ -531,11 +513,7 @@ async def chat_with_image(
     if llm_service is None:
         raise HTTPException(503, "LLM service not initialised.")
 
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     from app.payments import get_payment_service, OPERATION_COSTS
     ps = get_payment_service()
@@ -636,11 +614,7 @@ async def start_research(body: ResearchRequest, request: Request, bg: Background
     Returns immediately with a status message.  The final report and PDF
     are generated asynchronously.
     """
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     from app.payments import get_payment_service, OPERATION_COSTS
     ps = get_payment_service()
@@ -852,6 +826,14 @@ async def browser_fill_form(body: dict):
 # Authentication (Phase 4)
 # =========================================================================
 
+@app.get("/api/auth/options", tags=["Auth"])
+async def auth_options():
+    """Expose only the login choices enabled by the operator."""
+    settings = get_settings()
+    return {"registration_enabled": settings.ALLOW_REGISTRATION,
+            "demo_enabled": settings.ALLOW_DEMO_LOGIN}
+
+
 @app.post("/api/auth/register", tags=["Auth"])
 async def register(body: dict):
     """Register a new user account."""
@@ -902,12 +884,7 @@ async def refresh(body: dict):
 @app.get("/api/auth/me", tags=["Auth"])
 async def get_me(request: Request):
     """Get the current user's info."""
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        # Return demo user for backward compat
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
     return {"user": user}
 
 
@@ -938,12 +915,8 @@ async def get_credit_packs():
 @app.get("/api/payments/balance", tags=["Payments"])
 async def get_balance(request: Request):
     """Get user's credit balance (credits and cents)."""
-    from app.auth import get_optional_user
     from app.payments import get_payment_service
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
     ps = get_payment_service()
     balance = await ps.get_user_balance(user["id"])
     # Return rounded integer values to prevent breaking Swift/Kotlin client expectations
@@ -954,12 +927,8 @@ async def get_balance(request: Request):
 @app.post("/api/payments/stripe/checkout", tags=["Payments"])
 async def create_stripe_checkout(body: dict, request: Request):
     """Create a Stripe Checkout session for a credit pack."""
-    from app.auth import get_optional_user
     from app.payments import get_payment_service
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
     
     pack_id = body.get("pack_id")
     redirect_url = body.get("redirect_url", "http://localhost:3000")
@@ -987,12 +956,8 @@ async def stripe_webhook(request: Request):
 @app.post("/api/payments/paypal/create-order", tags=["Payments"])
 async def create_paypal_order(body: dict, request: Request):
     """Create a PayPal order for a credit pack."""
-    from app.auth import get_optional_user
     from app.payments import get_payment_service
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
         
     pack_id = body.get("pack_id")
     ps = get_payment_service()
@@ -1008,12 +973,8 @@ async def create_paypal_order(body: dict, request: Request):
 @app.post("/api/payments/paypal/capture-order", tags=["Payments"])
 async def capture_paypal_order(body: dict, request: Request):
     """Capture a PayPal order after user approval."""
-    from app.auth import get_optional_user
     from app.payments import get_payment_service
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
         
     order_id = body.get("order_id")
     ps = get_payment_service()
@@ -1027,12 +988,8 @@ async def capture_paypal_order(body: dict, request: Request):
 @app.post("/api/payments/btcpay/invoice", tags=["Payments"])
 async def create_btcpay_invoice(body: dict, request: Request):
     """Create a BTCPay Server invoice for a credit pack."""
-    from app.auth import get_optional_user
     from app.payments import get_payment_service
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
         
     pack_id = body.get("pack_id")
     redirect_url = body.get("redirect_url", "http://localhost:3000")
@@ -1079,12 +1036,8 @@ async def check_invoice_status(invoice_id: str):
 @app.get("/api/payments/history", tags=["Payments"])
 async def payment_history(request: Request):
     """Get payment history for the current user."""
-    from app.auth import get_optional_user
     from app.payments import get_payment_service
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
     ps = get_payment_service()
     return {"history": await ps.get_payment_history(user["id"])}
 
@@ -1092,12 +1045,8 @@ async def payment_history(request: Request):
 @app.get("/api/payments/usage", tags=["Payments"])
 async def usage_history(request: Request):
     """Get usage history for the current user."""
-    from app.auth import get_optional_user
     from app.payments import get_payment_service
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
     ps = get_payment_service()
     return {"usage": await ps.get_usage_history(user["id"])}
 
@@ -1121,11 +1070,7 @@ async def get_vapid_public_key():
 @app.post("/api/notifications/subscribe", tags=["Notifications"])
 async def subscribe_notifications(body: dict, request: Request):
     """Register a browser push subscription for the current user."""
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     endpoint = body.get("endpoint")
     keys = body.get("keys", {})
@@ -1143,11 +1088,7 @@ async def subscribe_notifications(body: dict, request: Request):
 @app.post("/api/notifications/test", tags=["Notifications"])
 async def send_test_notification(body: dict, request: Request):
     """Send a test push notification to the current user."""
-    from app.auth import get_optional_user
-    user = await get_optional_user(request)
-    if not user:
-        from app.auth import auth_service
-        user = await auth_service.create_or_get_demo_user()
+    user = await require_auth(request)
 
     from app.notifications import get_notification_service
     ns = get_notification_service()

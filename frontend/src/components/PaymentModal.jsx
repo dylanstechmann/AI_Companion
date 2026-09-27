@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Zap, Check, Loader, CreditCard, DollarSign } from 'lucide-react';
 
@@ -44,7 +45,7 @@ export default function PaymentModal({ onClose }) {
   // Fetch current credit balance
   const fetchBalance = async () => {
     try {
-      const res = await fetch('/api/payments/balance');
+      const res = await apiFetch('/api/payments/balance');
       if (res.ok) {
         const data = await res.json();
         setBalance(data.credits || 0);
@@ -83,7 +84,7 @@ export default function PaymentModal({ onClose }) {
         bodyPayload.redirect_url = window.location.origin;
       }
 
-      const res = await fetch(endpoint, {
+      const res = await apiFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(bodyPayload),
@@ -114,7 +115,7 @@ export default function PaymentModal({ onClose }) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/payments/invoice/${invoiceId}`);
+        const res = await apiFetch(`/api/payments/invoice/${invoiceId}`);
         const data = await res.json();
         if (!res.ok) return;
         const s = (data.status || '').toLowerCase();

@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import { useEffect, useState, useCallback } from 'react';
 import { Menu, Settings, Cpu, Bot, Puzzle, Globe, Bitcoin } from 'lucide-react';
 
@@ -12,6 +13,7 @@ export default function StatusBar({
   onOpenBrowser,
   onOpenPayments,
   user,
+  onLogout,
 }) {
   const [isOnline, setIsOnline] = useState(true);
 
@@ -19,7 +21,7 @@ export default function StatusBar({
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        const res = await fetch('/api/health');
+        const res = await apiFetch('/api/health');
         if (res.ok) {
           const data = await res.json();
           onHealthUpdate(data);
@@ -72,6 +74,10 @@ export default function StatusBar({
         {character && (
           <span className="status-character-name">{character.name}</span>
         )}
+
+        {user && <button className="btn-icon-sm btn-ghost" onClick={onLogout} title="Sign out">
+          Sign out
+        </button>}
 
         {/* Phase 3: Agent Orchestrator */}
         {onOpenAgents && (

@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 /**
@@ -35,7 +36,7 @@ export default function useSSE() {
     abortControllerRef.current = abortController;
 
     // Use fetch for POST-based SSE (more flexible than EventSource)
-    fetch(url, {
+    apiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

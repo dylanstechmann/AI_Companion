@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import { useState, useCallback } from 'react';
 import { X, Camera, Navigation, Globe, Loader } from 'lucide-react';
 
@@ -23,7 +24,7 @@ export default function BrowserView({ isOpen, onClose }) {
     setScreenshot(null);
 
     try {
-      const res = await fetch('/api/browser/navigate', {
+      const res = await apiFetch('/api/browser/navigate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
@@ -45,7 +46,7 @@ export default function BrowserView({ isOpen, onClose }) {
     setError(null);
 
     try {
-      const res = await fetch('/api/browser/screenshot', {
+      const res = await apiFetch('/api/browser/screenshot', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(url.trim() ? { url } : {}),
