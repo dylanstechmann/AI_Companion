@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Play, Square, Copy, Check, ChevronDown, ChevronUp, Terminal } from 'lucide-react';
 
@@ -37,7 +38,7 @@ export default function CodePanel({ language = 'python', code, autoRun = false }
     abortRef.current = controller;
 
     try {
-      const res = await fetch('/api/code/execute/stream', {
+      const res = await apiFetch('/api/code/execute/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ language, code }),

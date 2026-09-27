@@ -15,6 +15,9 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+      - APP_ENV=production
+      - ALLOW_REGISTRATION=false
+      - ALLOW_DEMO_LOGIN=false
     deploy:
       resources:
         reservations:

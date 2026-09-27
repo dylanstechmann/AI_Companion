@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Loader } from 'lucide-react';
 
@@ -176,7 +177,7 @@ export default function VoiceRecorder({ onVoiceMessage, isStreaming, sttMode }) 
     formData.append('file', audioBlob, 'recording.webm');
 
     try {
-      const response = await fetch('/api/stt', {
+      const response = await apiFetch('/api/stt', {
         method: 'POST',
         body: formData,
       });

@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import { useState, useRef, useCallback } from 'react';
 import { X, Play, Square, CheckCircle, AlertCircle, Loader, Clock } from 'lucide-react';
 
@@ -30,7 +31,7 @@ export default function AgentPanel({ isOpen, onClose }) {
     abortRef.current = controller;
 
     try {
-      const res = await fetch('/api/agents/orchestrate', {
+      const res = await apiFetch('/api/agents/orchestrate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query }),

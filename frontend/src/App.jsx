@@ -1,3 +1,4 @@
+import { apiFetch, getSession, setSession, subscribeSession } from './api.js';
 import { useState, useEffect, useCallback } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import ChatArea from './components/ChatArea.jsx';
@@ -24,50 +25,42 @@ export default function App() {
   const [health, setHealth] = useState(null);
   const [isLoadingCharacters, setIsLoadingCharacters] = useState(true);
 
-  // Auth state
-  const [user, setUser] = useState(null);
-  const [authToken, setAuthToken] = useState(null);
-  const [authChecked, setAuthChecked] = useState(false);
+  const [session, setAuthState] = useState(getSession);
+  const user = session?.user || null;
 
-  // Check for existing auth on load
+  useEffect(() => subscribeSession(setAuthState), []);
+
+  // Validate a restored tab session; apiFetch refreshes expired access tokens.
   useEffect(() => {
-    const checkAuth = async () => {
-      // Try to get demo user (backward compat — app works without login)
-      try {
-        const res = await fetch('/api/auth/demo', { method: 'POST' });
-        if (res.ok) {
-          const data = await res.json();
-          setUser(data.user);
-          setAuthToken(data.access_token);
-        }
-      } catch {
-        // If demo endpoint fails, show login page
-      }
-      setAuthChecked(true);
-    };
-    checkAuth();
+    if (getSession()) apiFetch('/api/auth/me').catch(() => {});
   }, []);
 
   const handleAuthSuccess = useCallback((userData, tokens) => {
-    setUser(userData);
-    setAuthToken(tokens.access_token);
+    setSession({ ...tokens, user: userData });
   }, []);
 
-  // Fetch characters on mount / after auth
-  useEffect(() => {
-    if (authChecked) fetchCharacters();
-  }, [authChecked]);
+  const handleLogout = useCallback(() => {
+    setSession(null);
+    setCharacters([]);
+    setSelectedCharacterId(null);
+    setShowSettings(false);
+    setShowAgents(false);
+    setShowSkills(false);
+    setShowBrowser(false);
+    setShowPayment(false);
+    setShowCreateModal(false);
+  }, []);
 
   const fetchCharacters = useCallback(async () => {
     setIsLoadingCharacters(true);
     try {
-      const res = await fetch('/api/characters');
+      const res = await apiFetch('/api/characters');
       if (res.ok) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : data.characters || [];
         setCharacters(list);
-        if (!selectedCharacterId && list.length > 0) {
-          setSelectedCharacterId(list[0].id);
+        if (list.length > 0) {
+          setSelectedCharacterId((current) => current ?? list[0].id);
         }
       }
     } catch (err) {
@@ -98,11 +91,19 @@ export default function App() {
         }
       ];
       setCharacters(defaults);
-      if (!selectedCharacterId) setSelectedCharacterId(defaults[0].id);
+      setSelectedCharacterId((current) => current ?? defaults[0].id);
     } finally {
       setIsLoadingCharacters(false);
     }
-  }, [selectedCharacterId, authChecked]);
+  }, []);
+
+  useEffect(() => {
+    if (user) fetchCharacters();
+    else {
+      setCharacters([]);
+      setSelectedCharacterId(null);
+    }
+  }, [user?.id, fetchCharacters]);
 
   const selectedCharacter = characters.find((c) => c.id === selectedCharacterId) || null;
 
@@ -117,7 +118,7 @@ export default function App() {
 
   const handleConfirmCreateCharacter = useCallback(async (charData, generateImmediately) => {
     // 1. Post to create character
-    const res = await fetch('/api/characters', {
+    const res = await apiFetch('/api/characters', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(charData),
@@ -131,7 +132,7 @@ export default function App() {
     // 2. If generateImmediately is true, call generate-avatar API
     if (generateImmediately && charData.appearance_description) {
       try {
-        const genRes = await fetch(`/api/characters/${created.id}/generate-avatar`, {
+        const genRes = await apiFetch(`/api/characters/${created.id}/generate-avatar`, {
           method: 'POST',
         });
         if (genRes.ok) {
@@ -165,8 +166,7 @@ export default function App() {
     setShowBrowser(false);
   }, []);
 
-  // Show login page if auth check is done and no user
-  if (authChecked && !user) {
+  if (!user) {
     return (
       <ErrorBoundary>
         <LoginPage onAuthSuccess={handleAuthSuccess} />
@@ -174,18 +174,6 @@ export default function App() {
     );
   }
 
-  // Show loading while checking auth
-  if (!authChecked) {
-    return (
-      <ErrorBoundary>
-        <div className="auth-page">
-          <div className="auth-card">
-            <h2 className="auth-title">Loading...</h2>
-          </div>
-        </div>
-      </ErrorBoundary>
-    );
-  }
 
   return (
     <ErrorBoundary>
@@ -213,6 +201,7 @@ export default function App() {
             onOpenBrowser={() => { closeAllPanels(); setShowBrowser(true); }}
             onOpenPayments={() => setShowPayment(true)}
             user={user}
+            onLogout={handleLogout}
           />
 
           <ChatArea character={selectedCharacter} characterId={selectedCharacterId} />

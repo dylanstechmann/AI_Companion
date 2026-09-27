@@ -1,8 +1,17 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { LogIn, UserPlus, Mail, Lock, User } from 'lucide-react';
 
 export default function LoginPage({ onAuthSuccess }) {
   const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [options, setOptions] = useState({ registration_enabled: false, demo_enabled: false });
+  useEffect(() => {
+    let active = true;
+    fetch('/api/auth/options', { cache: 'no-store' })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => { if (active && data) setOptions(data); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -113,11 +122,13 @@ export default function LoginPage({ onAuthSuccess }) {
           </button>
         </form>
 
-        <button className="auth-demo-btn" onClick={handleDemo} disabled={loading}>
-          Try Demo Mode
-        </button>
+        {options.demo_enabled && (
+          <button className="auth-demo-btn" onClick={handleDemo} disabled={loading}>
+            Try Demo Mode
+          </button>
+        )}
 
-        <div className="auth-toggle">
+        {options.registration_enabled && <div className="auth-toggle">
           {mode === 'login' ? (
             <>
               Don't have an account?{' '}
@@ -129,7 +140,7 @@ export default function LoginPage({ onAuthSuccess }) {
               <span onClick={() => setMode('login')}>Log In</span>
             </>
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );

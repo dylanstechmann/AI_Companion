@@ -1,3 +1,4 @@
+import { apiFetch } from '../api.js';
 import { useState, useEffect, useCallback } from 'react';
 import { X, Plus, Trash2, Code, Package, RefreshCw, Loader } from 'lucide-react';
 
@@ -24,7 +25,7 @@ export default function SkillsPanel({ isOpen, onClose }) {
   const fetchSkills = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/skills');
+      const res = await apiFetch('/api/skills');
       if (res.ok) {
         const data = await res.json();
         setSkills(data.skills || []);
@@ -49,7 +50,7 @@ export default function SkillsPanel({ isOpen, onClose }) {
         functionsSchema = JSON.parse(newFunctions);
       }
 
-      const res = await fetch('/api/skills', {
+      const res = await apiFetch('/api/skills', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -81,7 +82,7 @@ export default function SkillsPanel({ isOpen, onClose }) {
   const handleDelete = useCallback(async (skillName) => {
     if (!confirm(`Delete skill "${skillName}"?`)) return;
     try {
-      const res = await fetch(`/api/skills/${skillName}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/skills/${skillName}`, { method: 'DELETE' });
       if (res.ok) {
         fetchSkills();
       }
