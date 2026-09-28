@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    AUTH_RATE_LIMIT_LOGIN_MAX_ATTEMPTS: int = 5
+    AUTH_RATE_LIMIT_LOGIN_WINDOW_SECONDS: int = 60
+    AUTH_RATE_LIMIT_REFRESH_MAX_ATTEMPTS: int = 20
+    AUTH_RATE_LIMIT_REFRESH_WINDOW_SECONDS: int = 60
 
     # ---- Email (placeholder) -------------------------------------------------
     SMTP_HOST: str = ""

@@ -91,6 +91,8 @@ class AuthRouteTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         asyncio.run(database.init_db())
+        auth.auth_service.rate_limiter.reset()
+        self.addCleanup(auth.auth_service.rate_limiter.reset)
         # Lifespan is intentionally not started: no external providers or model services.
         self.client = TestClient(self.main.app)
         self.addCleanup(self.client.close)
@@ -223,6 +225,30 @@ class AuthRouteTests(unittest.TestCase):
     def test_public_auth_metadata_and_health_remain_accessible(self):
         self.assertEqual(self.client.get("/api/auth/options").status_code, 200)
         self.assertEqual(self.client.get("/api/health").status_code, 200)
+
+    def test_login_rate_limiting_enforces_429_after_threshold(self):
+        self.register()
+        for _ in range(5):
+            res = self.client.post("/api/auth/login", json={
+                "email": "owner@example.test", "password": "wrong-password",
+            })
+            self.assertEqual(res.status_code, 401)
+        throttled = self.client.post("/api/auth/login", json={
+            "email": "owner@example.test", "password": "wrong-password",
+        })
+        self.assertEqual(throttled.status_code, 429)
+        self.assertIn("Retry-After", throttled.headers)
+        self.assertIn("Too many login attempts", throttled.json()["detail"])
+
+    def test_token_refresh_rate_limiting_enforces_429(self):
+        tokens = self.register()
+        for _ in range(20):
+            res = self.client.post("/api/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+            self.assertEqual(res.status_code, 200)
+        throttled = self.client.post("/api/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+        self.assertEqual(throttled.status_code, 429)
+        self.assertIn("Retry-After", throttled.headers)
+        self.assertIn("Too many token refresh attempts", throttled.json()["detail"])
 
 
 if __name__ == "__main__":

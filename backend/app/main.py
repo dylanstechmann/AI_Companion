@@ -853,11 +853,19 @@ async def register(body: dict):
 
 
 @app.post("/api/auth/login", tags=["Auth"])
-async def login(body: dict):
-    """Login and return JWT tokens."""
+async def login(request: Request, body: dict):
+    """Login and return JWT tokens with rate limiting."""
     from app.auth import auth_service
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
+
+    auth_service.rate_limiter.check_login(client_ip, email)
+
     if not email or not password:
         raise HTTPException(400, "Email and password are required.")
     try:
@@ -868,9 +876,16 @@ async def login(body: dict):
 
 
 @app.post("/api/auth/refresh", tags=["Auth"])
-async def refresh(body: dict):
-    """Refresh an expired access token."""
+async def refresh(request: Request, body: dict):
+    """Refresh an expired access token with rate limiting."""
     from app.auth import auth_service
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    auth_service.rate_limiter.check_refresh(client_ip)
+
     token = body.get("refresh_token", "")
     if not token:
         raise HTTPException(400, "Missing refresh_token.")

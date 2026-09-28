@@ -116,6 +116,23 @@ The backend exposes a RESTful API at `http://localhost:8000`. Full interactive d
 1. Navigate to `https://your-host:3000`
 2. Tap the **"Add to Home Screen"** banner, or Menu → **Install App**
 
+### PWA & Security Hardening
+- **Auth Rate Limiting**: The backend enforces sliding-window rate limiting on `/api/auth/login` (5 attempts/min) and `/api/auth/refresh` (20 attempts/min) returning HTTP 429 with `Retry-After` headers to protect against brute-force attacks and token replay.
+- **Offline Fallback Experience**: Built-in responsive `offline.html` fallback with live connection health diagnostics and automatic reconnect polling when internet connectivity drops.
+- **Rich App Manifest**: Enhanced PWA manifest with application shortcuts (*Start Voice Chat*, *3D Avatars*), categories, and maskable icons for desktop and mobile install dialogs.
+
+### Testing & Verification
+
+Run the test suites across backend and frontend inside the dev container:
+
+```bash
+# Backend pytest suite (auth, rate limiting, and security invariants)
+cd backend && .venv/bin/python -m pytest
+
+# Frontend test suite (API client, token refresh coalescing, and PWA manifest)
+cd frontend && npm test
+```
+
 ---
 
 ## 📁 Project Structure

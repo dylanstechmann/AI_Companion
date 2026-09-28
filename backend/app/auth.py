@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any, Optional
@@ -78,6 +79,76 @@ def _default_secret() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+class AuthRateLimiter:
+    """Sliding-window rate limiter for sensitive authentication endpoints."""
+
+    def __init__(
+        self,
+        login_max: int = 5,
+        login_window: int = 60,
+        refresh_max: int = 20,
+        refresh_window: int = 60,
+    ) -> None:
+        self.login_max = login_max
+        self.login_window = login_window
+        self.refresh_max = refresh_max
+        self.refresh_window = refresh_window
+        self._login_attempts: dict[str, list[float]] = {}
+        self._refresh_attempts: dict[str, list[float]] = {}
+
+    def _check(
+        self,
+        registry: dict[str, list[float]],
+        key: str,
+        limit: int,
+        window: int,
+        action: str,
+    ) -> None:
+        now = time.time()
+        cutoff = now - window
+        history = [t for t in registry.get(key, []) if t > cutoff]
+        registry[key] = history
+
+        if len(history) >= limit:
+            oldest = history[0]
+            retry_after = max(1, int(window - (now - oldest)))
+            logger.warning("Rate limit exceeded for %s on key=%s (count=%d)", action, key, len(history))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many {action} attempts. Please wait {retry_after} seconds before retrying.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        history.append(now)
+
+    def check_login(self, client_ip: str, email: str = "") -> None:
+        """Rate limit login requests by IP and (IP, email)."""
+        settings = get_settings()
+        limit = getattr(settings, "AUTH_RATE_LIMIT_LOGIN_MAX_ATTEMPTS", self.login_max)
+        window = getattr(settings, "AUTH_RATE_LIMIT_LOGIN_WINDOW_SECONDS", self.login_window)
+
+        if email:
+            target_key = f"{client_ip}:{email.strip().lower()}"
+            self._check(self._login_attempts, target_key, limit, window, "login")
+        else:
+            self._check(self._login_attempts, client_ip, limit, window, "login")
+
+    def check_refresh(self, client_ip: str) -> None:
+        """Rate limit token refresh requests by IP."""
+        settings = get_settings()
+        limit = getattr(settings, "AUTH_RATE_LIMIT_REFRESH_MAX_ATTEMPTS", self.refresh_max)
+        window = getattr(settings, "AUTH_RATE_LIMIT_REFRESH_WINDOW_SECONDS", self.refresh_window)
+        self._check(self._refresh_attempts, client_ip, limit, window, "token refresh")
+
+    def reset(self) -> None:
+        """Clear all recorded rate limit attempts."""
+        self._login_attempts.clear()
+        self._refresh_attempts.clear()
+
+
+# ---------------------------------------------------------------------------
 # Authentication service
 # ---------------------------------------------------------------------------
 
@@ -86,6 +157,7 @@ class AuthService:
 
     def __init__(self) -> None:
         self.hasher = PasswordHasher()
+        self.rate_limiter = AuthRateLimiter()
 
     # -- token creation ------------------------------------------------------
 
