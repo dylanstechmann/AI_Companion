@@ -1,5 +1,7 @@
 # 🤖 AI Companion
 
+This is a personal hobby and learning project, developed with substantial assistance from AI coding tools.
+
 > A private, self-hosted AI assistant with persistent memory, voice interaction, and agentic capabilities — accessible as a PWA from any device, including instant launch via the iPhone Action Button.
 
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496EDlogo=docker&logoColor=white)](https://docs.docker.com/compose/)
@@ -13,7 +15,7 @@
 | Category | Capabilities |
 |---|---|
 | **🎙️ Voice Interface** | Real-time Speech-to-Text via Faster Whisper (GPU-accelerated), natural TTS responses |
-| **🧠 Persistent Memory** | Long-term memory with ChromaDB vector embeddings — your companion remembers everything |
+| **🧠 Persistent Memory** | Stores and retrieves conversation memories using ChromaDB vector embeddings |
 | **💬 Conversational AI** | Powered by OpenRouter with support for multiple LLM backends (GPT-4o, Claude, Llama, etc.) |
 | **🔧 Agentic Tools** | Code execution sandbox, web research, email integration, and extensible tool system |
 | **📱 PWA** | Installable Progressive Web App with offline support and iPhone Action Button integration |
