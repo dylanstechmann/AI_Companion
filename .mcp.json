@@ -13,6 +13,38 @@
         ".agent-tools/mcp/launch.sh",
         "web_mcp.py"
       ]
+    },
+    "github": {
+      "command": "sh",
+      "args": [
+        ".agent-tools/mcp/gh_mcp.sh"
+      ],
+      "env": {}
+    },
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "blender": {
+      "command": "uvx",
+      "args": [
+        "mcp-for-blender"
+      ],
+      "env": {
+        "BLENDER_HOST": "192.168.65.254",
+        "BLENDER_PORT": "9876",
+        "DISABLE_TELEMETRY": "true"
+      }
     }
   }
 }

@@ -27,3 +27,21 @@ Run the test suite that already exists. Do not invent a greenfield app on top of
 ## Done when
 
 The change is covered by a test or a documented manual check, and no secret is in the diff.
+
+## Agent tooling (portable across harnesses)
+
+<!-- agent-toolbox:installed -->
+
+This repo vendors its agent tooling (no secrets inside) so Claude Code,
+Cline, Codex, OpenCode, Kilo Code, Kimi Code and Grok share one setup:
+
+- `.mcp.json` — project MCP servers:
+  `scholar` (PubMed, OpenAlex, Semantic Scholar, CORE, ORCID, Crossref),
+  `web` (Exa, Brave, Jina, Firecrawl), `github` (read-only, token via
+  `gh auth token`), `context7` (library docs), `playwright` (browser).  Also `blender` (Blender MCP; needs the addon running).
+- `opencode.json` — the same servers for OpenCode;
+  `AGENT_TOOLS.md` has merge snippets for Codex / Cline / Kilo Code and
+  CLI fallbacks for Kimi / Grok.
+- `.claude/skills/` — project skills: literature-search, web-research, secrets-guard.
+- Keys: `~/.config/ai-keys.env` via the `agentkeys` loader — never in git,
+  MCP config or chat. Run `secrets-guard` (`--staged`) before committing.
