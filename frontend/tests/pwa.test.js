@@ -59,12 +59,12 @@ test('vite.config.js uses offline.html only as a fallback for app navigations', 
   assert.throws(() => handle({ response: { status: 502 } }), /frontend unavailable/);
 });
 
-test('offline reconnect waits for the app and restores the original shortcut URL', async () => {
+async function checkReconnect(initialURL, destination, expectedNavigation) {
   const markup = readFileSync(join(root, 'public/offline.html'), 'utf8');
   const script = markup.match(/<script>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script);
 
-  const shortcut = new URL('https://example.test/?mode=voice');
+  const initial = new URL(initialURL, 'https://example.test');
   const navigations = [];
   const requested = [];
   const events = {};
@@ -91,7 +91,12 @@ test('offline reconnect waits for the app and restores the original shortcut URL
       return responses.shift();
     },
     window: {
-      location: { pathname: shortcut.pathname, href: shortcut.href, replace: (url) => navigations.push(url) },
+      location: {
+        pathname: initial.pathname,
+        href: initial.href,
+        replace: (url) => navigations.push(['replace', url]),
+        reload: () => navigations.push(['reload']),
+      },
       addEventListener: (name, handler) => { events[name] = handler; },
       setInterval: () => 1,
       clearInterval: () => {},
@@ -106,6 +111,16 @@ test('offline reconnect waits for the app and restores the original shortcut URL
   await events.click();
   assert.deepEqual(navigations, []);
   await events.click();
-  assert.deepEqual(requested, ['/api/health', '/api/health', shortcut.href, '/api/health', shortcut.href]);
-  assert.deepEqual(navigations, [shortcut.href]);
+  assert.deepEqual(requested, ['/api/health', '/api/health', destination, '/api/health', destination]);
+  assert.deepEqual(navigations, [expectedNavigation]);
+}
+
+test('reconnect reloads a shortcut document after both probes succeed', async () => {
+  for (const url of ['/?mode=voice', '/?mode=voice#saved', '/index.html?tab=characters#selected']) {
+    await checkReconnect(url, new URL(url, 'https://example.test').href, ['reload']);
+  }
+});
+
+test('reconnect navigates a directly opened offline page to the app root', async () => {
+  await checkReconnect('/offline.html#preview', '/', ['replace', '/']);
 });
