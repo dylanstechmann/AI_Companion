@@ -13,6 +13,9 @@ import PaymentModal from './components/PaymentModal.jsx';
 import CreateCharacterModal from './components/CreateCharacterModal.jsx';
 
 export default function App() {
+  const launch = new URLSearchParams(window.location.search);
+  const openCharacters = launch.get('tab') === 'characters';
+  const focusVoice = !openCharacters && launch.get('mode') === 'voice';
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -21,7 +24,7 @@ export default function App() {
   const [showBrowser, setShowBrowser] = useState(false);
   const [showPayment, setShowPayment] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(openCharacters);
   const [health, setHealth] = useState(null);
   const [isLoadingCharacters, setIsLoadingCharacters] = useState(true);
 
@@ -186,6 +189,7 @@ export default function App() {
           onSelect={handleSelectCharacter}
           onCreate={handleCreateCharacter}
           isOpen={sidebarOpen}
+          focusOnOpen={openCharacters && sidebarOpen}
           isLoading={isLoadingCharacters}
         />
 
@@ -204,7 +208,7 @@ export default function App() {
             onLogout={handleLogout}
           />
 
-          <ChatArea character={selectedCharacter} characterId={selectedCharacterId} />
+          <ChatArea character={selectedCharacter} characterId={selectedCharacterId} focusVoice={focusVoice} />
         </main>
       </div>
 

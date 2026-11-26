@@ -1,4 +1,5 @@
 import { Sparkles, Plus } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 
 export default function Sidebar({
   characters = [],
@@ -6,14 +7,20 @@ export default function Sidebar({
   onSelect,
   onCreate,
   isOpen,
+  focusOnOpen = false,
   isLoading = false,
 }) {
+  const sidebar = useRef(null);
+  useEffect(() => {
+    if (focusOnOpen) sidebar.current?.focus();
+  }, [focusOnOpen]);
+
   const getInitial = (name) => {
     return name ? name.charAt(0).toUpperCase() : '?';
   };
 
   return (
-    <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
+    <aside ref={sidebar} tabIndex={-1} aria-label="Characters" className={`sidebar ${isOpen ? 'open' : ''}`}>
       {/* Header */}
       <div className="sidebar-header">
         <div className="sidebar-logo">

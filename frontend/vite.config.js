@@ -54,8 +54,24 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        navigateFallback: '/offline.html',
-        navigateFallbackDenylist: [/^\/api\//],
+        // Let the navigation strategy handle the entry document, including shortcuts.
+        globIgnores: ['**/node_modules/**/*', '**/index.html'],
+        navigateFallback: null,
+        runtimeCaching: [{
+          urlPattern: ({ request, sameOrigin, url }) =>
+            sameOrigin && request.mode === 'navigate' &&
+            (url.pathname === '/' || url.pathname === '/index.html'),
+          handler: 'NetworkOnly',
+          options: {
+            plugins: [{
+              fetchDidSucceed: ({ response }) => {
+                if (response.status >= 500) throw new Error('Companion frontend unavailable');
+                return response;
+              },
+            }],
+            precacheFallback: { fallbackURL: '/offline.html' },
+          },
+        }],
       },
     }),
   ],

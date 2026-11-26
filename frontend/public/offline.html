@@ -176,15 +176,16 @@
 
     <h1>Connection Paused</h1>
     <p class="lead">
-      AI Companion is currently offline. Real-time voice processing and language models require internet access, but your session and preferences are safely stored.
+      This device could not reach AI Companion. Check your connection to your Companion server.
     </p>
 
-    <button id="retry-btn" class="btn" type="button" onclick="checkConnection()">
+    <button id="retry-btn" class="btn" type="button">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
       </svg>
       Check Connection &amp; Reconnect
     </button>
+    <p class="tips" id="retry-status" role="status"></p>
 
     <section class="diagnostics" aria-label="System Diagnostics">
       <div class="diag-item">
@@ -202,45 +203,59 @@
     </section>
 
     <p class="tips">
-      Tip: The app will automatically reconnect as soon as network access is restored.
+      The app checks again while your device reports a network connection.
     </p>
   </main>
 
   <script>
-    function updateStatus() {
-      const isOnline = navigator.onLine;
-      const netStatus = document.getElementById('net-status');
-      if (netStatus) {
-        netStatus.innerHTML = isOnline
-          ? '<span class="dot green"></span> Connected'
-          : '<span class="dot red"></span> Disconnected';
-      }
-      if (isOnline) {
-        // Automatically attempt to reload when network returns
-        window.location.reload();
-      }
+    const retryButton = document.getElementById('retry-btn');
+    const retryStatus = document.getElementById('retry-status');
+    const destination = window.location.pathname === '/offline.html'
+      ? '/'
+      : window.location.href;
+
+    function updateNetworkStatus() {
+      document.getElementById('net-status').innerHTML = navigator.onLine
+        ? '<span class="dot green"></span> Connected'
+        : '<span class="dot red"></span> Disconnected';
     }
 
     async function checkConnection() {
-      const btn = document.getElementById('retry-btn');
-      if (btn) btn.textContent = 'Checking connectivity...';
+      updateNetworkStatus();
+      if (retryButton.disabled) return;
+
+      retryButton.disabled = true;
+      retryStatus.textContent = 'Checking the Companion server…';
+      const controller = new AbortController();
+      const deadline = window.setTimeout(() => controller.abort(), 5000);
+      const options = { cache: 'no-store', signal: controller.signal };
       try {
-        const res = await fetch('/api/health', { method: 'GET', cache: 'no-store' });
-        if (res.ok) {
-          window.location.href = '/';
-          return;
+        const health = await fetch('/api/health', options);
+        if (health.ok && (await health.json()).status === 'ok') {
+          // The API may recover before the frontend when routed separately.
+          const page = await fetch(destination, options);
+          if (page.ok && page.headers.get('content-type')?.startsWith('text/html')) {
+            window.clearInterval(poll);
+            window.location.replace(destination);
+            return;
+          }
         }
-      } catch (_) {}
-      if (navigator.onLine) {
-        window.location.href = '/';
-      } else {
-        if (btn) btn.textContent = 'Still Offline · Try Again';
+      } catch {
+        // A timeout, network error or invalid health response is a failed check.
+      } finally {
+        window.clearTimeout(deadline);
+        retryButton.disabled = false;
       }
+      retryStatus.textContent = 'Companion server unavailable. Try again shortly.';
     }
 
-    window.addEventListener('online', updateStatus);
-    window.addEventListener('offline', updateStatus);
-    updateStatus();
+    const poll = window.setInterval(() => {
+      if (navigator.onLine) void checkConnection();
+    }, 5000);
+    retryButton.addEventListener('click', checkConnection);
+    window.addEventListener('online', checkConnection);
+    window.addEventListener('offline', updateNetworkStatus);
+    updateNetworkStatus();
   </script>
 </body>
 </html>

@@ -120,7 +120,7 @@ The backend exposes a RESTful API at `http://localhost:8000`. Full interactive d
 
 ### PWA & Security Hardening
 - **Auth Rate Limiting**: The backend enforces sliding-window rate limiting on `/api/auth/login` (5 attempts/min) and `/api/auth/refresh` (20 attempts/min) returning HTTP 429 with `Retry-After` headers to protect against brute-force attacks and token replay.
-- **Offline Fallback Experience**: Built-in responsive `offline.html` fallback with live connection health diagnostics and automatic reconnect polling when internet connectivity drops.
+- **Offline fallback** checks the Companion server and restores the original app URL, including voice and avatar shortcuts, when the API and frontend respond. [Workbox offline fallback](https://developer.chrome.com/docs/workbox/migration/migrate-from-v5#precachefallback_in_runtime_caching)
 - **Rich App Manifest**: Enhanced PWA manifest with application shortcuts (*Start Voice Chat*, *3D Avatars*), categories, and maskable icons for desktop and mobile install dialogs.
 
 ### Testing & Verification
@@ -134,6 +134,8 @@ cd backend && .venv/bin/python -m pytest
 # Frontend test suite (API client, token refresh coalescing, and PWA manifest)
 cd frontend && npm test
 ```
+
+For a browser check, use a production build with an active service worker and the backend reachable at `/api/health`. Sign in, then open the voice shortcut and check that focus moves to the microphone button. Recording starts only after activating the button. In the same tab, take the browser offline and reload the shortcut. After reconnecting, check that the fallback restores the shortcut URL and microphone focus. Open the avatar shortcut and check that the character sidebar opens and receives focus. API URLs remain outside the navigation fallback.
 
 ---
 
