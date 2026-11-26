@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 const root = process.cwd();
 
@@ -34,9 +35,77 @@ test('public/manifest.json contains enhanced PWA install metadata and shortcuts'
   assert.ok(has192 && has512, 'Must include maskable 192x192 and 512x512 icons');
 });
 
-test('vite.config.js wires navigateFallback to offline.html and ignores /api/', () => {
+test('vite.config.js uses offline.html only as a fallback for app navigations', () => {
   const viteConfigPath = join(root, 'vite.config.js');
   const content = readFileSync(viteConfigPath, 'utf8');
-  assert.ok(content.includes("navigateFallback: '/offline.html'"), 'Must specify offline.html navigateFallback');
-  assert.ok(content.includes('navigateFallbackDenylist'), 'Must deny api routes from fallback');
+  const match = content.match(/urlPattern: ([\s\S]*?),\s*handler: 'NetworkOnly'/);
+  assert.ok(match, 'Must route app navigation over the network');
+  assert.ok(content.includes('navigateFallback: null'));
+  assert.ok(content.includes("'**/index.html'"), 'The entry document must use the navigation strategy');
+  assert.ok(content.includes("precacheFallback: { fallbackURL: '/offline.html' }"));
+  assert.ok(!content.includes('networkTimeoutSeconds'), 'Workbox build rejects this option for NetworkOnly');
+  const matches = runInNewContext(match[1]);
+  const request = { mode: 'navigate' };
+  assert.equal(matches({ request, sameOrigin: true, url: new URL('https://example.test/?mode=voice') }), true);
+  assert.equal(matches({ request, sameOrigin: true, url: new URL('https://example.test/api/health') }), false);
+  assert.equal(matches({ request, sameOrigin: false, url: new URL('https://example.test/') }), false);
+  const successHandler = content.match(/fetchDidSucceed: ([\s\S]*?\n\s*\}),/);
+  assert.ok(successHandler);
+  const handle = runInNewContext(successHandler[1]);
+  for (const status of [200, 404]) {
+    const response = { status };
+    assert.equal(handle({ response }), response);
+  }
+  assert.throws(() => handle({ response: { status: 502 } }), /frontend unavailable/);
+});
+
+test('offline reconnect waits for the app and restores the original shortcut URL', async () => {
+  const markup = readFileSync(join(root, 'public/offline.html'), 'utf8');
+  const script = markup.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script);
+
+  const shortcut = new URL('https://example.test/?mode=voice');
+  const navigations = [];
+  const requested = [];
+  const events = {};
+  const retryButton = {
+    disabled: false,
+    addEventListener: (name, handler) => { events[name] = handler; },
+  };
+  const retryStatus = { textContent: '' };
+  const elements = { 'net-status': {}, 'retry-btn': retryButton, 'retry-status': retryStatus };
+  const health = { ok: true, json: async () => ({ status: 'ok' }) };
+  const responses = [
+    { ok: false },
+    health,
+    { ok: false },
+    health,
+    { ok: true, headers: new Headers({ 'Content-Type': 'text/html; charset=utf-8' }) },
+  ];
+  runInNewContext(script, {
+    AbortController,
+    document: { getElementById: (id) => elements[id] },
+    navigator: { onLine: true },
+    fetch: async (url) => {
+      requested.push(url);
+      return responses.shift();
+    },
+    window: {
+      location: { pathname: shortcut.pathname, href: shortcut.href, replace: (url) => navigations.push(url) },
+      addEventListener: (name, handler) => { events[name] = handler; },
+      setInterval: () => 1,
+      clearInterval: () => {},
+      setTimeout: () => 2,
+      clearTimeout: () => {},
+    },
+  });
+
+  await events.online();
+  assert.deepEqual(navigations, []);
+  assert.match(retryStatus.textContent, /server unavailable/);
+  await events.click();
+  assert.deepEqual(navigations, []);
+  await events.click();
+  assert.deepEqual(requested, ['/api/health', '/api/health', shortcut.href, '/api/health', shortcut.href]);
+  assert.deepEqual(navigations, [shortcut.href]);
 });

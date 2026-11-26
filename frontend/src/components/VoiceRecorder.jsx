@@ -5,7 +5,7 @@ import { Mic, MicOff, Loader } from 'lucide-react';
 const SILENCE_THRESHOLD_MS = 2000; // 2 seconds of silence
 const VOLUME_THRESHOLD = 5; // Minimal RMS volume out of 255 to trigger speaking
 
-export default function VoiceRecorder({ onVoiceMessage, isStreaming, sttMode }) {
+export default function VoiceRecorder({ onVoiceMessage, isStreaming, focusOnOpen = false }) {
   const [isMuted, setIsMuted] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   
@@ -204,6 +204,7 @@ export default function VoiceRecorder({ onVoiceMessage, isStreaming, sttMode }) 
     <button 
       type="button"
       className={`icon-btn ${!isMuted ? 'recording glow-danger' : ''}`}
+      autoFocus={focusOnOpen}
       onClick={toggleMute}
       title={isMuted ? "Unmute for hands-free mode" : "Mute microphone"}
     >

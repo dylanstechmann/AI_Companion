@@ -24,7 +24,7 @@ function getTTSSettings() {
   }
 }
 
-export default function ChatArea({ character, characterId }) {
+export default function ChatArea({ character, characterId, focusVoice }) {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [pendingImage, setPendingImage] = useState(null);
@@ -462,7 +462,7 @@ export default function ChatArea({ character, characterId }) {
               disabled={!characterId}
             />
           </div>
-          <VoiceRecorder onVoiceMessage={handleVoiceMessage} isStreaming={aiActive} />
+          <VoiceRecorder onVoiceMessage={handleVoiceMessage} isStreaming={aiActive} focusOnOpen={focusVoice} />
           <button
             className="send-btn"
             onClick={handleSend}
