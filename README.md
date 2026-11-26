@@ -135,7 +135,7 @@ cd backend && .venv/bin/python -m pytest
 cd frontend && npm test
 ```
 
-For a browser check, use a production build with an active service worker and the backend reachable at `/api/health`. Sign in, then open the voice shortcut and check that focus moves to the microphone button. Recording starts only after activating the button. In the same tab, take the browser offline and reload the shortcut. After reconnecting, check that the fallback restores the shortcut URL and microphone focus. Open the avatar shortcut and check that the character sidebar opens and receives focus. API URLs remain outside the navigation fallback.
+For a browser check, use a production build with an active service worker and the backend reachable at `/api/health`. Sign in, then open the voice shortcut and check that focus moves to the microphone button. Recording starts only after activating the button. Add a fragment such as `#saved` to the shortcut URL, then take the browser offline and reload it in the same tab. After reconnecting, check that the fallback restores the shortcut URL and microphone focus. Open the avatar shortcut and check that the character sidebar opens and receives focus. API URLs remain outside the navigation fallback.
 
 ---
 

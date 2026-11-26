@@ -210,9 +210,8 @@
   <script>
     const retryButton = document.getElementById('retry-btn');
     const retryStatus = document.getElementById('retry-status');
-    const destination = window.location.pathname === '/offline.html'
-      ? '/'
-      : window.location.href;
+    const openedDirectly = window.location.pathname === '/offline.html';
+    const destination = openedDirectly ? '/' : window.location.href;
 
     function updateNetworkStatus() {
       document.getElementById('net-status').innerHTML = navigator.onLine
@@ -236,7 +235,9 @@
           const page = await fetch(destination, options);
           if (page.ok && page.headers.get('content-type')?.startsWith('text/html')) {
             window.clearInterval(poll);
-            window.location.replace(destination);
+            // Assigning the current URL with a fragment can keep this offline document open.
+            if (openedDirectly) window.location.replace(destination);
+            else window.location.reload();
             return;
           }
         }
