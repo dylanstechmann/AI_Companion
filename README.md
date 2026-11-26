@@ -51,54 +51,56 @@ This is a personal hobby and learning project, developed with substantial assist
 | [Git](https://git-scm.com/) | 2.0+ | For cloning the repository |
 
 > [!NOTE]
-> GPU is required for local Whisper STT. If you don't have an NVIDIA GPU, you can switch `STT_MODE` to `api` in your `.env` to use a cloud-based STT provider instead.
+> The supplied development Compose file reserves an NVIDIA GPU. The backend also accepts `STT_MODE=cloud`, which sends audio to its configured transcription provider. Changing that setting leaves the Compose GPU reservation in place.
 
 ---
 
 ## ⚡ Quick Start
 
+The development ports bind to localhost. Registration and demo login start disabled. For the first launch, generate a `JWT_SECRET` and temporarily set `ALLOW_REGISTRATION=true` in `.env` as described in [Authentication and trusted accounts](docs/AUTHENTICATION.md#create-the-first-account-locally).
+
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/AI_Companion.git
+git clone https://github.com/dylanstechmann/AI_Companion.git
 cd AI_Companion
 
 # 2. Create your environment file
 cp .env.example .env
 
-# 3. Edit .env with your API keys
-#    At minimum, set OPENROUTER_API_KEY
+# 3. Configure local setup in .env
+#    Set OPENROUTER_API_KEY for chat and follow the account setup above.
 nano .env   # or use your preferred editor
 
 # 4. Build and launch
-docker compose up --build
+docker compose up --build -d
 
 # 5. Open the app
 #    Frontend:  http://localhost:3000
 #    Backend:   http://localhost:8000/docs  (Swagger UI)
 ```
 
+At `http://localhost:3000`, choose **Register** to create your first trusted account. Set `ALLOW_REGISTRATION=false` again in `.env` and apply it with `docker compose up -d --force-recreate backend`. Use the same account for subsequent sign-ins.
+
 > [!TIP]
-> Use `docker compose up --build -d` to run in detached mode. View logs with `docker compose logs -f`.
+> View service logs with `docker compose logs -f`.
 
 ---
 
 ## 🔌 API Endpoints
 
-The backend exposes a RESTful API at `http://localhost:8000`. Full interactive documentation is available at `/docs` (Swagger UI) and `/redoc` (ReDoc).
+The development backend exposes its API at `http://localhost:8000`. See `/docs` (Swagger UI) or `/redoc` (ReDoc) for the full route list. Operational requests require an `Authorization: Bearer <access_token>` header. The frontend handles sign-in and token refresh.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/chat` | Send a text message and receive an AI response |
-| `POST` | `/api/voice/transcribe` | Upload audio for Speech-to-Text transcription |
-| `POST` | `/api/voice/synthesize` | Convert text to speech audio |
-| `GET` | `/api/memory/search` | Search long-term memory by semantic query |
-| `POST` | `/api/memory/add` | Manually add an entry to long-term memory |
-| `GET` | `/api/conversations` | List all conversation sessions |
-| `GET` | `/api/conversations/{id}` | Retrieve a specific conversation history |
-| `DELETE` | `/api/conversations/{id}` | Delete a conversation session |
-| `POST` | `/api/tools/execute` | Execute code in the sandboxed environment |
-| `POST` | `/api/tools/research` | Perform web research on a topic |
-| `GET` | `/api/health` | Health check and system status |
+| `GET` | `/api/health` | Check service status without signing in |
+| `GET` | `/api/auth/options` | Check which sign-in options the instance enables |
+| `GET` | `/api/characters` | List companion characters |
+| `GET` | `/api/characters/{character_id}/messages` | Retrieve a character's conversation history |
+| `POST` | `/api/chat` | Send a text message and stream the response |
+| `POST` | `/api/stt` | Upload an audio file for transcription |
+| `POST` | `/api/tts` | Convert text to speech audio |
+| `POST` | `/api/code/execute` | Run Python or JavaScript in the code execution service |
+| `POST` | `/api/agent/research` | Start a research request |
 
 ---
 
@@ -125,14 +127,14 @@ The backend exposes a RESTful API at `http://localhost:8000`. Full interactive d
 
 ### Testing & Verification
 
-Run the test suites across backend and frontend inside the dev container:
+In the dev container, install the backend test dependencies from [`backend/requirements-test.txt`](backend/requirements-test.txt) and run `npm ci` in `frontend`. The commands below start at the repository root.
 
 ```bash
-# Backend pytest suite (auth, rate limiting, and security invariants)
-cd backend && .venv/bin/python -m pytest
+# From a fresh shell at the repository root, run the backend auth suite
+(cd backend && python -B -m unittest discover -s tests -v)
 
-# Frontend test suite (API client, token refresh coalescing, and PWA manifest)
-cd frontend && npm test
+# Run the frontend API client and PWA suite
+(cd frontend && npm test)
 ```
 
 For a browser check, use a production build with an active service worker and the backend reachable at `/api/health`. Sign in, then open the voice shortcut and check that focus moves to the microphone button. Recording starts only after activating the button. Add a fragment such as `#saved` to the shortcut URL, then take the browser offline and reload it in the same tab. After reconnecting, check that the fallback restores the shortcut URL and microphone focus. Open the avatar shortcut and check that the character sidebar opens and receives focus. API URLs remain outside the navigation fallback.
@@ -233,10 +235,3 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 <p align="center">
   Built with ❤️ and a healthy distrust of cloud-only AI
 </p>
-## Authentication setup
-
-Before exposing this instance, follow [Authentication and trusted accounts](docs/AUTHENTICATION.md).
-The development ports bind to localhost. Registration and demo login are disabled
-by default; create the first trusted account locally, then disable registration.
-All operational API requests require a Bearer token. The frontend handles token
-attachment, refresh, and sign-out.
