@@ -76,6 +76,60 @@ test('coalesces concurrent expired-token requests into one refresh and retries o
   assert.equal(getSession().access_token, 'new-access');
 });
 
+for (const status of [429, 503]) {
+  test(`refresh status ${status} keeps the tab session available for the next request`, async () => {
+    let refreshes = 0;
+    let attempts = 0;
+    globalThis.fetch = async (url, options) => {
+      if (url === '/api/auth/refresh') {
+        refreshes++;
+        return refreshes === 1 ? json({}, status) : json(fresh());
+      }
+      attempts++;
+      return options.headers.get('Authorization') === 'Bearer new-access' ? json({}) : json({}, 401);
+    };
+    const saved = getSession();
+    assert.equal((await apiFetch('/api/skills')).status, 401);
+    assert.equal(getSession(), saved);
+    assert.deepEqual(JSON.parse(storage.get('ai-companion-session')), saved);
+    assert.equal(attempts, 1);
+    assert.equal((await apiFetch('/api/skills')).status, 200);
+    assert.equal(refreshes, 2);
+    assert.equal(attempts, 3);
+  });
+}
+
+test('a new login can refresh independently while the previous login loses its connection', async () => {
+  let failOldRefresh;
+  let signalOldRefresh;
+  const oldRefreshStarted = new Promise((resolve) => { signalOldRefresh = resolve; });
+  const nextLogin = { access_token: 'second-access', refresh_token: 'second-refresh', user: { id: 2 } };
+  const renewed = { ...nextLogin, access_token: 'renewed-access' };
+  const refreshes = [];
+  globalThis.fetch = async (url, options) => {
+    if (url !== '/api/auth/refresh') {
+      return options.headers.get('Authorization') === 'Bearer renewed-access' ? json({}) : json({}, 401);
+    }
+    const token = JSON.parse(options.body).refresh_token;
+    refreshes.push(token);
+    if (token === nextLogin.refresh_token) return json(renewed);
+    signalOldRefresh();
+    return new Promise((_resolve, reject) => { failOldRefresh = reject; });
+  };
+  const oldRequest = apiFetch('/api/skills');
+  await oldRefreshStarted;
+  setSession(nextLogin);
+  const newRequest = apiFetch('/api/config');
+  const offline = new TypeError('offline');
+  failOldRefresh(offline);
+  const [oldResult, newResult] = await Promise.allSettled([oldRequest, newRequest]);
+  assert.equal(oldResult.reason, offline);
+  assert.equal(newResult.status, 'fulfilled');
+  assert.equal(newResult.value.status, 200);
+  assert.deepEqual(refreshes, ['refresh', nextLogin.refresh_token]);
+  assert.deepEqual(getSession(), renewed);
+});
+
 test('invalid refresh clears the session, storage and notifies the UI', async () => {
   const states = [];
   const unsubscribe = subscribeSession((value) => states.push(value));
@@ -127,6 +181,23 @@ test('an in-flight request cannot be retried for a newly signed-in user', async 
   complete(json({}, 401));
   assert.equal((await result).status, 401);
   assert.equal(getSession().user.id, 2);
+});
+
+test('a delayed write is never replayed after logout and a fresh login to the same account', async () => {
+  let finish;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    if (requests === 1) return new Promise((resolve) => { finish = resolve; });
+    return json({});
+  };
+  const pending = apiFetch('/api/chat', { method: 'POST', body: 'old message' });
+  setSession(null);
+  setSession(fresh());
+  finish(json({}, 401));
+  assert.equal((await pending).status, 401);
+  assert.equal(requests, 1);
+  assert.deepEqual(getSession(), fresh());
 });
 
 test('a valid session survives module reload within the same browser tab', async () => {
