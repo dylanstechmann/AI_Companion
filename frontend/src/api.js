@@ -3,6 +3,7 @@ const STORAGE_KEY = 'ai-companion-session';
 const listeners = new Set();
 let session = loadSession();
 let refreshInFlight = null;
+let loginGeneration = 0;
 
 function loadSession() {
   try {
@@ -16,6 +17,11 @@ function loadSession() {
 export function getSession() { return session; }
 
 export function setSession(value) {
+  loginGeneration += 1;
+  storeSession(value);
+}
+
+function storeSession(value) {
   session = value;
   try {
     if (value) globalThis.sessionStorage?.setItem(STORAGE_KEY, JSON.stringify(value));
@@ -46,7 +52,7 @@ async function refreshSession(previous) {
         return;
       }
       const next = await response.json();
-      if (session === previous) setSession(next?.access_token && next?.user ? next : null);
+      if (session === previous) storeSession(next?.access_token && next?.user ? next : null);
     })();
     refreshInFlight = { session: previous, promise: pending };
     try { await pending; }
@@ -62,6 +68,7 @@ export async function apiFetch(input, options = {}) {
   const isPublicAuth = /^\/api\/auth\/(login|register|refresh|demo|options)\/?$/.test(url.pathname);
   const headers = new Headers(options.headers);
   const previous = session;
+  const generation = loginGeneration;
   const attachToken = isApi && !isPublicAuth && previous?.access_token && !headers.has('Authorization');
   if (attachToken) headers.set('Authorization', `Bearer ${previous.access_token}`);
   const request = { ...options, headers, ...(isApi ? { cache: 'no-store' } : {}) };
@@ -73,7 +80,7 @@ export async function apiFetch(input, options = {}) {
     else setSession(null);
   }
   // A request started under an older login must never be replayed for a new user.
-  if (!session || session === previous || session.user.id !== previous.user.id) return response;
+  if (loginGeneration !== generation || !session || session === previous || session.user.id !== previous.user.id) return response;
   const retriedSession = session;
   headers.set('Authorization', `Bearer ${retriedSession.access_token}`);
   response = await fetch(input, { ...request, headers });

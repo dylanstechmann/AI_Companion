@@ -183,6 +183,23 @@ test('an in-flight request cannot be retried for a newly signed-in user', async 
   assert.equal(getSession().user.id, 2);
 });
 
+test('a delayed write is never replayed after logout and a fresh login to the same account', async () => {
+  let finish;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    if (requests === 1) return new Promise((resolve) => { finish = resolve; });
+    return json({});
+  };
+  const pending = apiFetch('/api/chat', { method: 'POST', body: 'old message' });
+  setSession(null);
+  setSession(fresh());
+  finish(json({}, 401));
+  assert.equal((await pending).status, 401);
+  assert.equal(requests, 1);
+  assert.deepEqual(getSession(), fresh());
+});
+
 test('a valid session survives module reload within the same browser tab', async () => {
   const reloaded = await import('../src/api.js?reload-test');
   assert.deepEqual(reloaded.getSession(), initial());
