@@ -2,7 +2,7 @@
 const STORAGE_KEY = 'ai-companion-session';
 const listeners = new Set();
 let session = loadSession();
-let refreshPromise = null;
+let refreshInFlight = null;
 
 function loadSession() {
   try {
@@ -30,7 +30,7 @@ export function subscribeSession(listener) {
 }
 
 async function refreshSession(previous) {
-  if (!refreshPromise) {
+  if (refreshInFlight?.session !== previous) {
     const pending = (async () => {
       const response = await fetch('/api/auth/refresh', {
         method: 'POST',
@@ -41,17 +41,18 @@ async function refreshSession(previous) {
       // Never restore a session after logout or overwrite a newer login.
       if (session !== previous) return;
       if (!response.ok) {
+        if (response.status === 429 || response.status >= 500) return;
         setSession(null);
         return;
       }
       const next = await response.json();
       if (session === previous) setSession(next?.access_token && next?.user ? next : null);
     })();
-    refreshPromise = pending;
+    refreshInFlight = { session: previous, promise: pending };
     try { await pending; }
-    finally { if (refreshPromise === pending) refreshPromise = null; }
+    finally { if (refreshInFlight?.promise === pending) refreshInFlight = null; }
   } else {
-    await refreshPromise;
+    await refreshInFlight.promise;
   }
 }
 
@@ -72,7 +73,7 @@ export async function apiFetch(input, options = {}) {
     else setSession(null);
   }
   // A request started under an older login must never be replayed for a new user.
-  if (!session || session.user.id !== previous.user.id) return response;
+  if (!session || session === previous || session.user.id !== previous.user.id) return response;
   const retriedSession = session;
   headers.set('Authorization', `Bearer ${retriedSession.access_token}`);
   response = await fetch(input, { ...request, headers });
