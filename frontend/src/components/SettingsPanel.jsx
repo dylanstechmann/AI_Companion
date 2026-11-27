@@ -1,3 +1,4 @@
+import { subscribeBrowserVoices } from '../browserVoices.js';
 import { apiFetch } from '../api.js';
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, Save, Server, Cpu, Volume2, Loader, Sparkles } from 'lucide-react';
@@ -53,11 +54,7 @@ export default function SettingsPanel({ character, health, onClose, onUpdateChar
 
     // Load browser voices
     if ('speechSynthesis' in window) {
-      const loadVoices = () => {
-        setBrowserVoices(window.speechSynthesis.getVoices());
-      };
-      loadVoices();
-      window.speechSynthesis.onvoiceschanged = loadVoices;
+      return subscribeBrowserVoices(window.speechSynthesis, setBrowserVoices);
     }
   }, []);
 

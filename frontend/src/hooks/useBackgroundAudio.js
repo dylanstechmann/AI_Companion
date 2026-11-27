@@ -1,3 +1,4 @@
+import { subscribeBrowserVoices } from '../browserVoices.js';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 /**
@@ -61,14 +62,12 @@ export default function useBackgroundAudio(characterName = 'AI Companion') {
   useEffect(() => {
     if (!('speechSynthesis' in window)) return;
 
-    const loadVoices = () => {
-      voicesRef.current = window.speechSynthesis.getVoices();
-    };
-
-    loadVoices();
-    window.speechSynthesis.onvoiceschanged = loadVoices;
+    const unsubscribe = subscribeBrowserVoices(window.speechSynthesis, (voices) => {
+      voicesRef.current = voices;
+    });
 
     return () => {
+      unsubscribe();
       window.speechSynthesis.cancel();
     };
   }, []);
